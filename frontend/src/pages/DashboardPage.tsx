@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { projectsApi } from '../services/api'
@@ -8,9 +8,19 @@ import toast from 'react-hot-toast'
 export default function DashboardPage() {
   const [newProjectTitle, setNewProjectTitle] = useState('')
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameTitle, setRenameTitle] = useState('')
+  const renameInputRef = useRef<HTMLInputElement>(null)
   const { user, logout } = useAuthStore()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+
+  useEffect(() => {
+    if (renamingId && renameInputRef.current) {
+      renameInputRef.current.focus()
+      renameInputRef.current.select()
+    }
+  }, [renamingId])
 
   const { data: projects, isLoading } = useQuery({
     queryKey: ['projects'],
@@ -30,9 +40,57 @@ export default function DashboardPage() {
     },
   })
 
+  const deleteProject = useMutation({
+    mutationFn: (id: string) => projectsApi.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
+      toast.success('Project deleted')
+    },
+    onError: () => {
+      toast.error('Failed to delete project')
+    },
+  })
+
+  const renameProject = useMutation({
+    mutationFn: ({ id, title }: { id: string; title: string }) =>
+      projectsApi.update(id, { title }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
+      setRenamingId(null)
+      toast.success('Project renamed')
+    },
+    onError: () => {
+      toast.error('Failed to rename project')
+    },
+  })
+
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault()
     createProject.mutate(newProjectTitle)
+  }
+
+  const handleDelete = (e: React.MouseEvent, id: string, title: string) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (window.confirm(`Delete "${title}"? This cannot be undone.`)) {
+      deleteProject.mutate(id)
+    }
+  }
+
+  const startRename = (e: React.MouseEvent, id: string, title: string) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setRenamingId(id)
+    setRenameTitle(title)
+  }
+
+  const submitRename = (id: string) => {
+    const trimmed = renameTitle.trim()
+    if (trimmed && trimmed !== projects?.find((p) => p.id === id)?.title) {
+      renameProject.mutate({ id, title: trimmed })
+    } else {
+      setRenamingId(null)
+    }
   }
 
   return (
@@ -71,9 +129,42 @@ export default function DashboardPage() {
                 to={`/project/${project.id}`}
                 style={styles.card}
               >
-                <h3>{project.title}</h3>
+                <div style={styles.cardHeader}>
+                  {renamingId === project.id ? (
+                    <input
+                      ref={renameInputRef}
+                      value={renameTitle}
+                      onChange={(e) => setRenameTitle(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') submitRename(project.id)
+                        if (e.key === 'Escape') setRenamingId(null)
+                      }}
+                      onBlur={() => submitRename(project.id)}
+                      onClick={(e) => e.preventDefault()}
+                      style={styles.renameInput}
+                    />
+                  ) : (
+                    <h3 style={styles.cardTitle}>{project.title}</h3>
+                  )}
+                  <div style={styles.cardActions}>
+                    <button
+                      style={styles.actionBtn}
+                      onClick={(e) => startRename(e, project.id, project.title)}
+                      title="Rename"
+                    >
+                      &#9998;
+                    </button>
+                    <button
+                      style={{ ...styles.actionBtn, ...styles.deleteBtn }}
+                      onClick={(e) => handleDelete(e, project.id, project.title)}
+                      title="Delete"
+                    >
+                      &times;
+                    </button>
+                  </div>
+                </div>
                 <p>
-                  {project.visibility === 'private' ? '🔒 Private' : '🌍 Public'}
+                  {project.visibility === 'private' ? 'Private' : 'Public'}
                 </p>
                 <p style={styles.date}>
                   {new Date(project.updated_at).toLocaleDateString()}
@@ -173,6 +264,46 @@ const styles: Record<string, React.CSSProperties> = {
     textDecoration: 'none',
     color: 'inherit',
     transition: 'transform 0.2s, box-shadow 0.2s',
+  },
+  cardHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: '8px',
+  },
+  cardTitle: {
+    margin: 0,
+    flex: 1,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
+  },
+  cardActions: {
+    display: 'flex',
+    gap: '4px',
+    flexShrink: 0,
+  },
+  actionBtn: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    padding: '2px 6px',
+    fontSize: '16px',
+    borderRadius: '4px',
+    color: 'var(--color-text-muted)',
+    lineHeight: 1,
+  },
+  deleteBtn: {
+    fontSize: '20px',
+  },
+  renameInput: {
+    flex: 1,
+    fontSize: '16px',
+    fontWeight: 600,
+    padding: '2px 4px',
+    border: '1px solid var(--color-primary)',
+    borderRadius: '4px',
+    outline: 'none',
   },
   date: {
     fontSize: '12px',

@@ -29,6 +29,7 @@ export default function EditorPage() {
   const mountedRef = useRef(true)
   const ytextRef = useRef<Y.Text | null>(null)
   const isDraggingRef = useRef(false)
+  const saveRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     mountedRef.current = true
@@ -50,7 +51,7 @@ export default function EditorPage() {
     enabled: !!projectId,
   })
 
-  // Bug 1 fix: Load file content from backend when currentFile changes
+  // Load file content from backend when currentFile changes
   useEffect(() => {
     if (!projectId || !currentFile) return
     let cancelled = false
@@ -59,7 +60,10 @@ export default function EditorPage() {
       .getFile(projectId, currentFile)
       .then((res) => {
         if (cancelled) return
-        const fileContent = typeof res.data === 'string' ? res.data : (res.data as any)?.content ?? ''
+        const fileContent =
+          typeof res.data === 'string'
+            ? res.data
+            : ((res.data as any)?.content ?? '')
         setContent(fileContent)
         // Sync to Yjs doc if connected
         if (ytextRef.current) {
@@ -73,7 +77,6 @@ export default function EditorPage() {
         }
       })
       .catch(() => {
-        // File might not exist yet (e.g. new project), start with empty content
         if (!cancelled) setContent('')
       })
 
@@ -92,6 +95,50 @@ export default function EditorPage() {
     onError: () => toast.error('Save failed'),
     onSettled: () => setSaving(false),
   })
+
+  // Keep saveRef in sync for Ctrl+S
+  saveRef.current = () => saveFile.mutate()
+
+  // Ctrl+S keyboard shortcut
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault()
+        saveRef.current()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
+  const deleteFile = useMutation({
+    mutationFn: (path: string) => projectsApi.deleteFile(projectId!, path),
+    onSuccess: (_, deletedPath) => {
+      queryClient.invalidateQueries({ queryKey: ['files', projectId] })
+      toast.success('File deleted')
+      if (currentFile === deletedPath) {
+        setCurrentFile('main.tex')
+      }
+    },
+    onError: () => toast.error('Failed to delete file'),
+  })
+
+  const handleDeleteFile = (e: React.MouseEvent, path: string) => {
+    e.stopPropagation()
+    if (window.confirm(`Delete "${path}"?`)) {
+      deleteFile.mutate(path)
+    }
+  }
+
+  const handleDownload = () => {
+    const blob = new Blob([content], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = currentFile.split('/').pop() || 'file.tex'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   const compile = useMutation({
     mutationFn: () => compileApi.createJob(projectId!),
@@ -136,12 +183,14 @@ export default function EditorPage() {
         } else if (data.status === 'failed') {
           clearInterval(interval)
           setCompiling(false)
-          // Bug 5 fix: Fetch logs and show detailed error in preview
           const errorMsg = data.error_message || 'Compilation failed'
           let logs = ''
           try {
             const logRes = await compileApi.getLogs(jobId)
-            logs = typeof logRes.data === 'string' ? logRes.data : JSON.stringify(logRes.data, null, 2)
+            logs =
+              typeof logRes.data === 'string'
+                ? logRes.data
+                : JSON.stringify(logRes.data, null, 2)
           } catch {
             logs = 'Could not retrieve compilation logs.'
           }
@@ -184,36 +233,39 @@ export default function EditorPage() {
     }
   }, [projectId])
 
-  // Bug 2 fix: Draggable splitter
-  const handleSplitterMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    isDraggingRef.current = true
+  // Draggable splitter
+  const handleSplitterMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault()
+      isDraggingRef.current = true
 
-    const startX = e.clientX
-    const startWidth = previewWidth
+      const startX = e.clientX
+      const startWidth = previewWidth
 
-    const onMouseMove = (moveEvent: MouseEvent) => {
-      if (!isDraggingRef.current) return
-      const delta = startX - moveEvent.clientX
-      const newWidth = Math.max(200, Math.min(800, startWidth + delta))
-      setPreviewWidth(newWidth)
-    }
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        if (!isDraggingRef.current) return
+        const delta = startX - moveEvent.clientX
+        const newWidth = Math.max(200, Math.min(800, startWidth + delta))
+        setPreviewWidth(newWidth)
+      }
 
-    const onMouseUp = () => {
-      isDraggingRef.current = false
-      document.removeEventListener('mousemove', onMouseMove)
-      document.removeEventListener('mouseup', onMouseUp)
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-    }
+      const onMouseUp = () => {
+        isDraggingRef.current = false
+        document.removeEventListener('mousemove', onMouseMove)
+        document.removeEventListener('mouseup', onMouseUp)
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+      }
 
-    document.body.style.cursor = 'col-resize'
-    document.body.style.userSelect = 'none'
-    document.addEventListener('mousemove', onMouseMove)
-    document.addEventListener('mouseup', onMouseUp)
-  }, [previewWidth])
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+      document.addEventListener('mousemove', onMouseMove)
+      document.addEventListener('mouseup', onMouseUp)
+    },
+    [previewWidth],
+  )
 
-  // Bug 3 fix: Create file handler
+  // Create file handler
   const handleCreateFile = async () => {
     const trimmed = newFileName.trim()
     if (!trimmed || !projectId) return
@@ -240,6 +292,9 @@ export default function EditorPage() {
           <h2>{project?.title || 'Loading...'}</h2>
         </div>
         <div style={styles.headerRight}>
+          <button className="secondary" onClick={handleDownload}>
+            Download
+          </button>
           <button
             className="secondary"
             onClick={() => saveFile.mutate()}
@@ -279,18 +334,29 @@ export default function EditorPage() {
             >
               main.tex
             </li>
-            {files?.filter((file) => file.path !== 'main.tex').map((file) => (
-              <li
-                key={file.id}
-                style={{
-                  ...styles.fileItem,
-                  ...(currentFile === file.path ? styles.fileItemActive : {}),
-                }}
-                onClick={() => setCurrentFile(file.path)}
-              >
-                {file.path}
-              </li>
-            ))}
+            {files
+              ?.filter((file) => file.path !== 'main.tex')
+              .map((file) => (
+                <li
+                  key={file.id}
+                  style={{
+                    ...styles.fileItem,
+                    ...(currentFile === file.path
+                      ? styles.fileItemActive
+                      : {}),
+                  }}
+                  onClick={() => setCurrentFile(file.path)}
+                >
+                  <span style={styles.fileName}>{file.path}</span>
+                  <button
+                    style={styles.fileDeleteBtn}
+                    onClick={(e) => handleDeleteFile(e, file.path)}
+                    title="Delete file"
+                  >
+                    &times;
+                  </button>
+                </li>
+              ))}
           </ul>
         </aside>
 
@@ -312,11 +378,8 @@ export default function EditorPage() {
           />
         </div>
 
-        {/* Bug 2 fix: Draggable splitter handle */}
-        <div
-          style={styles.splitter}
-          onMouseDown={handleSplitterMouseDown}
-        />
+        {/* Draggable splitter handle */}
+        <div style={styles.splitter} onMouseDown={handleSplitterMouseDown} />
 
         <aside style={{ ...styles.preview, width: `${previewWidth}px` }}>
           <div style={styles.previewHeader}>
@@ -345,14 +408,17 @@ export default function EditorPage() {
         </aside>
       </div>
 
-      {/* Bug 3 fix: New file modal */}
+      {/* New file modal */}
       {showNewFileModal && (
-        <div style={styles.modalOverlay} onClick={() => setShowNewFileModal(false)}>
+        <div
+          style={styles.modalOverlay}
+          onClick={() => setShowNewFileModal(false)}
+        >
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ margin: '0 0 16px 0' }}>New File</h3>
             <input
               type="text"
-              placeholder="filename.tex"
+              placeholder="path/to/filename.tex"
               value={newFileName}
               onChange={(e) => setNewFileName(e.target.value)}
               onKeyDown={(e) => {
@@ -448,10 +514,30 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     fontSize: '13px',
     transition: 'background-color 0.15s',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   fileItemActive: {
     backgroundColor: 'var(--color-secondary)',
     color: 'white',
+  },
+  fileName: {
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
+    flex: 1,
+  },
+  fileDeleteBtn: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    padding: '0 4px',
+    fontSize: '16px',
+    lineHeight: 1,
+    color: 'inherit',
+    opacity: 0.6,
+    flexShrink: 0,
   },
   editor: {
     flex: 1,
