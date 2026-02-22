@@ -1,18 +1,30 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import Editor from '@monaco-editor/react'
+import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react'
+import type * as Monaco from 'monaco-editor'
 import * as Y from 'yjs'
 import { WebsocketProvider } from 'y-websocket'
 import { projectsApi, compileApi } from '../services/api'
+import { useAuthStore } from '../stores/auth'
+import FileTree from '../components/FileTree'
+import DocumentOutline from '../components/DocumentOutline'
+import { registerLatexLanguage } from '../editor/latexLanguage'
+import { userColor } from '../utils/userColor'
 import toast from 'react-hot-toast'
 
 const WS_URL =
   import.meta.env.VITE_COLLAB_WS_URL ||
   `ws://${window.location.hostname}:${window.location.port}/ws-collab`
 
+interface AwarenessUser {
+  name: string
+  color: string
+}
+
 export default function EditorPage() {
   const { projectId } = useParams<{ projectId: string }>()
+  const { user } = useAuthStore()
   const [content, setContent] = useState('')
   const [saving, setSaving] = useState(false)
   const [compiling, setCompiling] = useState(false)
@@ -25,11 +37,13 @@ export default function EditorPage() {
     message: string
     logs: string
   } | null>(null)
+  const [connectedUsers, setConnectedUsers] = useState<AwarenessUser[]>([])
   const queryClient = useQueryClient()
   const mountedRef = useRef(true)
   const ytextRef = useRef<Y.Text | null>(null)
   const isDraggingRef = useRef(false)
   const saveRef = useRef<() => void>(() => {})
+  const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
 
   useEffect(() => {
     mountedRef.current = true
@@ -65,7 +79,6 @@ export default function EditorPage() {
             ? res.data
             : ((res.data as any)?.content ?? '')
         setContent(fileContent)
-        // Sync to Yjs doc if connected
         if (ytextRef.current) {
           const ytext = ytextRef.current
           if (ytext.toString() !== fileContent) {
@@ -111,7 +124,7 @@ export default function EditorPage() {
     return () => window.removeEventListener('keydown', handler)
   }, [])
 
-  const deleteFile = useMutation({
+  const deleteFileMutation = useMutation({
     mutationFn: (path: string) => projectsApi.deleteFile(projectId!, path),
     onSuccess: (_, deletedPath) => {
       queryClient.invalidateQueries({ queryKey: ['files', projectId] })
@@ -123,12 +136,18 @@ export default function EditorPage() {
     onError: () => toast.error('Failed to delete file'),
   })
 
-  const handleDeleteFile = (e: React.MouseEvent, path: string) => {
-    e.stopPropagation()
-    if (window.confirm(`Delete "${path}"?`)) {
-      deleteFile.mutate(path)
-    }
-  }
+  const renameFileMutation = useMutation({
+    mutationFn: ({ oldPath, newPath }: { oldPath: string; newPath: string }) =>
+      projectsApi.renameFile(projectId!, oldPath, newPath),
+    onSuccess: (_, { oldPath, newPath }) => {
+      queryClient.invalidateQueries({ queryKey: ['files', projectId] })
+      toast.success('File renamed')
+      if (currentFile === oldPath) {
+        setCurrentFile(newPath)
+      }
+    },
+    onError: () => toast.error('Failed to rename file'),
+  })
 
   const handleDownload = () => {
     const blob = new Blob([content], { type: 'text/plain' })
@@ -211,6 +230,7 @@ export default function EditorPage() {
     setContent(value || '')
   }
 
+  // Yjs collaboration + presence
   useEffect(() => {
     if (!projectId) return
 
@@ -226,12 +246,37 @@ export default function EditorPage() {
       }
     })
 
+    // Set local awareness
+    if (user) {
+      provider.awareness.setLocalStateField('user', {
+        name: user.email,
+        color: userColor(user.id),
+      })
+    }
+
+    // Track connected users
+    const updateUsers = () => {
+      const states = provider.awareness.getStates()
+      const users: AwarenessUser[] = []
+      states.forEach((state, clientId) => {
+        if (clientId !== provider.awareness.clientID && state.user) {
+          users.push(state.user)
+        }
+      })
+      if (mountedRef.current) setConnectedUsers(users)
+    }
+
+    provider.awareness.on('change', updateUsers)
+    updateUsers()
+
     return () => {
       ytextRef.current = null
+      provider.awareness.off('change', updateUsers)
       provider.destroy()
       ydoc.destroy()
+      setConnectedUsers([])
     }
-  }, [projectId])
+  }, [projectId, user])
 
   // Draggable splitter
   const handleSplitterMouseDown = useCallback(
@@ -282,6 +327,31 @@ export default function EditorPage() {
     }
   }
 
+  const handleNewFileInFolder = (folderPath: string) => {
+    setNewFileName(`${folderPath}/`)
+    setShowNewFileModal(true)
+  }
+
+  // Monaco setup
+  const handleEditorBeforeMount: BeforeMount = (monaco) => {
+    registerLatexLanguage(monaco)
+  }
+
+  const handleEditorMount: OnMount = (editor) => {
+    editorRef.current = editor
+  }
+
+  const handleOutlineNavigate = (line: number) => {
+    if (editorRef.current) {
+      editorRef.current.revealLineInCenter(line)
+      editorRef.current.setPosition({ lineNumber: line, column: 1 })
+      editorRef.current.focus()
+    }
+  }
+
+  // Memoized outline
+  const outlineContent = useMemo(() => content, [content])
+
   return (
     <div style={styles.container}>
       <header style={styles.header}>
@@ -290,6 +360,22 @@ export default function EditorPage() {
             &larr; Back
           </Link>
           <h2>{project?.title || 'Loading...'}</h2>
+          {connectedUsers.length > 0 && (
+            <div style={styles.presenceBar}>
+              {connectedUsers.map((u, i) => (
+                <div
+                  key={i}
+                  style={{
+                    ...styles.presenceDot,
+                    backgroundColor: u.color,
+                  }}
+                  title={u.name}
+                >
+                  {u.name[0].toUpperCase()}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         <div style={styles.headerRight}>
           <button className="secondary" onClick={handleDownload}>
@@ -324,40 +410,24 @@ export default function EditorPage() {
               +
             </button>
           </div>
-          <ul style={styles.fileList}>
-            <li
-              style={{
-                ...styles.fileItem,
-                ...(currentFile === 'main.tex' ? styles.fileItemActive : {}),
-              }}
-              onClick={() => setCurrentFile('main.tex')}
-            >
-              main.tex
-            </li>
-            {files
-              ?.filter((file) => file.path !== 'main.tex')
-              .map((file) => (
-                <li
-                  key={file.id}
-                  style={{
-                    ...styles.fileItem,
-                    ...(currentFile === file.path
-                      ? styles.fileItemActive
-                      : {}),
-                  }}
-                  onClick={() => setCurrentFile(file.path)}
-                >
-                  <span style={styles.fileName}>{file.path}</span>
-                  <button
-                    style={styles.fileDeleteBtn}
-                    onClick={(e) => handleDeleteFile(e, file.path)}
-                    title="Delete file"
-                  >
-                    &times;
-                  </button>
-                </li>
-              ))}
-          </ul>
+          <div style={styles.sidebarContent}>
+            {files && (
+              <FileTree
+                files={files}
+                currentFile={currentFile}
+                onSelectFile={setCurrentFile}
+                onDeleteFile={(path) => deleteFileMutation.mutate(path)}
+                onRenameFile={(oldPath, newPath) =>
+                  renameFileMutation.mutate({ oldPath, newPath })
+                }
+                onNewFileInFolder={handleNewFileInFolder}
+              />
+            )}
+            <DocumentOutline
+              content={outlineContent}
+              onNavigate={handleOutlineNavigate}
+            />
+          </div>
         </aside>
 
         <div style={styles.editor}>
@@ -367,6 +437,8 @@ export default function EditorPage() {
             theme="vs-light"
             value={content}
             onChange={handleEditorChange}
+            beforeMount={handleEditorBeforeMount}
+            onMount={handleEditorMount}
             options={{
               minimap: { enabled: false },
               fontSize: 14,
@@ -374,6 +446,9 @@ export default function EditorPage() {
               lineNumbers: 'on',
               glyphMargin: true,
               folding: true,
+              quickSuggestions: true,
+              suggestOnTriggerCharacters: true,
+              tabCompletion: 'on',
             }}
           />
         </div>
@@ -480,6 +555,22 @@ const styles: Record<string, React.CSSProperties> = {
   backLink: {
     fontSize: '14px',
   },
+  presenceBar: {
+    display: 'flex',
+    gap: '4px',
+    marginLeft: '8px',
+  },
+  presenceDot: {
+    width: '24px',
+    height: '24px',
+    borderRadius: '50%',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: '11px',
+    fontWeight: 700,
+    color: 'white',
+  },
   main: {
     flex: 1,
     display: 'flex',
@@ -498,46 +589,15 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     padding: '12px 16px',
     borderBottom: '1px solid var(--color-border)',
+    flexShrink: 0,
+  },
+  sidebarContent: {
+    flex: 1,
+    overflow: 'auto',
   },
   iconBtn: {
     padding: '4px 8px',
     fontSize: '12px',
-  },
-  fileList: {
-    listStyle: 'none',
-    padding: '8px 0',
-    margin: 0,
-    overflow: 'auto',
-  },
-  fileItem: {
-    padding: '8px 16px',
-    cursor: 'pointer',
-    fontSize: '13px',
-    transition: 'background-color 0.15s',
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  fileItemActive: {
-    backgroundColor: 'var(--color-secondary)',
-    color: 'white',
-  },
-  fileName: {
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap' as const,
-    flex: 1,
-  },
-  fileDeleteBtn: {
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    padding: '0 4px',
-    fontSize: '16px',
-    lineHeight: 1,
-    color: 'inherit',
-    opacity: 0.6,
-    flexShrink: 0,
   },
   editor: {
     flex: 1,
