@@ -44,6 +44,10 @@ class ProjectFileResponse(BaseModel):
     updated_at: datetime
 
 
+class ProjectFileRename(BaseModel):
+    new_path: str
+
+
 class FileTreeNode(BaseModel):
     name: str
     path: str

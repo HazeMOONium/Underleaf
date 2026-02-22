@@ -53,6 +53,11 @@ export const projectsApi = {
 
   deleteFile: (projectId: string, path: string) =>
     api.delete(`/projects/${projectId}/files/${path}`),
+
+  renameFile: (projectId: string, oldPath: string, newPath: string) =>
+    api.patch<ProjectFile>(`/projects/${projectId}/files/${oldPath}`, {
+      new_path: newPath,
+    }),
 }
 
 export const compileApi = {

@@ -14,6 +14,7 @@ from app.schemas.project import (
     ProjectResponse,
     ProjectFileBase,
     ProjectFileResponse,
+    ProjectFileRename,
 )
 from app.services.minio_service import minio_service
 
@@ -203,6 +204,53 @@ def get_file(
         return Response(content=content.decode("utf-8"), media_type="text/plain")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch file: {str(e)}")
+
+
+@router.patch("/{project_id}/files/{file_path:path}", response_model=ProjectFileResponse)
+def rename_file(
+    project_id: str,
+    file_path: str,
+    rename_data: ProjectFileRename,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    get_project_with_access(project_id, current_user.id, db)
+
+    file = db.query(ProjectFile).filter(
+        ProjectFile.project_id == project_id,
+        ProjectFile.path == file_path,
+    ).first()
+
+    if not file:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    new_path = rename_data.new_path.strip()
+    if not new_path:
+        raise HTTPException(status_code=400, detail="New path cannot be empty")
+
+    conflict = db.query(ProjectFile).filter(
+        ProjectFile.project_id == project_id,
+        ProjectFile.path == new_path,
+    ).first()
+    if conflict:
+        raise HTTPException(status_code=409, detail="A file already exists at the target path")
+
+    bucket = minio_service._default_bucket
+    new_blob_ref = f"{project_id}/{new_path}"
+
+    if file.blob_ref:
+        try:
+            content = minio_service.download_file(bucket, file.blob_ref)
+            minio_service.upload_file(bucket, new_blob_ref, content)
+            minio_service.delete_file(bucket, file.blob_ref)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to rename file in storage: {str(e)}")
+
+    file.path = new_path
+    file.blob_ref = new_blob_ref
+    db.commit()
+    db.refresh(file)
+    return file
 
 
 @router.delete("/{project_id}/files/{file_path:path}", status_code=status.HTTP_204_NO_CONTENT)
