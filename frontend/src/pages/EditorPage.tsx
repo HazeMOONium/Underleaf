@@ -9,7 +9,11 @@ import { projectsApi, compileApi } from '../services/api'
 import { useAuthStore } from '../stores/auth'
 import FileTree from '../components/FileTree'
 import DocumentOutline from '../components/DocumentOutline'
-import { registerLatexLanguage } from '../editor/latexLanguage'
+import PDFViewer from '../components/PDFViewer'
+import AIPanel from '../components/AIPanel'
+import { registerLatexLanguage, registerLatexDiagnostics } from '../editor/latexLanguage'
+import { parseSyncTeX, findSourceFromClick } from '../utils/synctexParser'
+import type { SyncTeXData } from '../utils/synctexParser'
 import { userColor } from '../utils/userColor'
 import toast from 'react-hot-toast'
 
@@ -30,14 +34,20 @@ export default function EditorPage() {
   const [compiling, setCompiling] = useState(false)
   const [currentFile, setCurrentFile] = useState('main.tex')
   const [pdfUrl, setPdfUrl] = useState<string | null>(null)
+  const [syncTeXData, setSyncTeXData] = useState<SyncTeXData | null>(null)
   const [previewWidth, setPreviewWidth] = useState(400)
   const [showNewFileModal, setShowNewFileModal] = useState(false)
   const [newFileName, setNewFileName] = useState('')
+  const [showNewFolderModal, setShowNewFolderModal] = useState(false)
+  const [newFolderParent, setNewFolderParent] = useState('')
+  const [newFolderName, setNewFolderName] = useState('')
   const [compileError, setCompileError] = useState<{
     message: string
     logs: string
   } | null>(null)
   const [connectedUsers, setConnectedUsers] = useState<AwarenessUser[]>([])
+  const [showAIPanel, setShowAIPanel] = useState(false)
+  const [selectedText, setSelectedText] = useState('')
   const queryClient = useQueryClient()
   const mountedRef = useRef(true)
   const ytextRef = useRef<Y.Text | null>(null)
@@ -50,6 +60,7 @@ export default function EditorPage() {
     return () => {
       mountedRef.current = false
       if (pdfUrl) URL.revokeObjectURL(pdfUrl)
+      if (latexDiagnosticsCleanupRef.current) latexDiagnosticsCleanupRef.current()
     }
   }, [])
 
@@ -199,6 +210,14 @@ export default function EditorPage() {
           } catch {
             toast.error('Failed to load PDF preview')
           }
+          // Fetch synctex for inverse sync (best-effort)
+          try {
+            const syncRes = await compileApi.getSyncTeX(jobId)
+            const stData = await parseSyncTeX(syncRes.data as ArrayBuffer)
+            setSyncTeXData(stData)
+          } catch {
+            setSyncTeXData(null)
+          }
         } else if (data.status === 'failed') {
           clearInterval(interval)
           setCompiling(false)
@@ -332,13 +351,71 @@ export default function EditorPage() {
     setShowNewFileModal(true)
   }
 
+  const handleCreateFolder = (parentPath: string) => {
+    setNewFolderParent(parentPath)
+    setNewFolderName('')
+    setShowNewFolderModal(true)
+  }
+
+  const submitCreateFolder = async () => {
+    const trimmed = newFolderName.trim()
+    if (!trimmed || !projectId) return
+    const fullPath = newFolderParent ? `${newFolderParent}/${trimmed}/.gitkeep` : `${trimmed}/.gitkeep`
+    try {
+      await projectsApi.createFile(projectId, fullPath, '')
+      queryClient.invalidateQueries({ queryKey: ['files', projectId] })
+      setShowNewFolderModal(false)
+      setNewFolderName('')
+      toast.success(`Folder "${trimmed}" created`)
+    } catch {
+      toast.error('Failed to create folder')
+    }
+  }
+
+  const handleDownloadFile = async (path: string) => {
+    let text = content
+    if (path !== currentFile) {
+      try {
+        const res = await projectsApi.getFile(projectId!, path)
+        text = typeof res.data === 'string' ? res.data : ((res.data as any)?.content ?? '')
+      } catch {
+        toast.error('Failed to download file')
+        return
+      }
+    }
+    const blob = new Blob([text], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = path.split('/').pop() || 'file.tex'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   // Monaco setup
   const handleEditorBeforeMount: BeforeMount = (monaco) => {
     registerLatexLanguage(monaco)
   }
 
-  const handleEditorMount: OnMount = (editor) => {
+  const latexDiagnosticsCleanupRef = useRef<(() => void) | null>(null)
+
+  const handleEditorMount: OnMount = (editor, monaco) => {
     editorRef.current = editor
+    // Clean up any previous diagnostics registration
+    if (latexDiagnosticsCleanupRef.current) {
+      latexDiagnosticsCleanupRef.current()
+    }
+    latexDiagnosticsCleanupRef.current = registerLatexDiagnostics(monaco, editor)
+
+    // Track selection for AI rewrite mode
+    editor.onDidChangeCursorSelection(() => {
+      const sel = editor.getSelection()
+      if (sel && !sel.isEmpty()) {
+        setSelectedText(editor.getModel()?.getValueInRange(sel) ?? '')
+      } else {
+        setSelectedText('')
+      }
+    })
   }
 
   const handleOutlineNavigate = (line: number) => {
@@ -347,6 +424,20 @@ export default function EditorPage() {
       editorRef.current.setPosition({ lineNumber: line, column: 1 })
       editorRef.current.focus()
     }
+  }
+
+  const handlePDFDoubleClick = (page: number, yRatio: number) => {
+    if (!syncTeXData) return
+    const loc = findSourceFromClick(syncTeXData, page, yRatio)
+    if (!loc) return
+    // If the source file differs from the current file, switch to it
+    const targetFile = files?.find((f) => f.path.endsWith(loc.file))?.path ?? loc.file
+    if (targetFile !== currentFile) {
+      setCurrentFile(targetFile)
+    }
+    // Navigate after a tick (allow file switch + editor re-render)
+    setTimeout(() => handleOutlineNavigate(loc.line), 50)
+    toast.success(`Jumped to ${loc.file}:${loc.line}`, { duration: 1500 })
   }
 
   // Memoized outline
@@ -378,6 +469,14 @@ export default function EditorPage() {
           )}
         </div>
         <div style={styles.headerRight}>
+          <button
+            className="secondary"
+            onClick={() => setShowAIPanel((v) => !v)}
+            title="AI Assistant"
+            style={showAIPanel ? { outline: '2px solid var(--color-primary)' } : {}}
+          >
+            ✨ AI
+          </button>
           <button className="secondary" onClick={handleDownload}>
             Download
           </button>
@@ -402,13 +501,24 @@ export default function EditorPage() {
         <aside style={styles.sidebar}>
           <div style={styles.sidebarHeader}>
             <h3>Files</h3>
-            <button
-              className="secondary"
-              style={styles.iconBtn}
-              onClick={() => setShowNewFileModal(true)}
-            >
-              +
-            </button>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <button
+                className="secondary"
+                style={styles.iconBtn}
+                onClick={() => handleCreateFolder('')}
+                title="New folder"
+              >
+                &#128193;
+              </button>
+              <button
+                className="secondary"
+                style={styles.iconBtn}
+                onClick={() => setShowNewFileModal(true)}
+                title="New file"
+              >
+                +
+              </button>
+            </div>
           </div>
           <div style={styles.sidebarContent}>
             {files && (
@@ -421,12 +531,21 @@ export default function EditorPage() {
                   renameFileMutation.mutate({ oldPath, newPath })
                 }
                 onNewFileInFolder={handleNewFileInFolder}
+                onCreateFolder={handleCreateFolder}
+                onDownloadFile={handleDownloadFile}
               />
             )}
             <DocumentOutline
               content={outlineContent}
               onNavigate={handleOutlineNavigate}
             />
+            {showAIPanel && (
+              <AIPanel
+                errorLogs={compileError?.logs ?? null}
+                fileContent={content}
+                selectedText={selectedText}
+              />
+            )}
           </div>
         </aside>
 
@@ -469,10 +588,9 @@ export default function EditorPage() {
                 <pre style={styles.errorLogs}>{compileError.logs}</pre>
               </div>
             ) : pdfUrl ? (
-              <iframe
-                src={pdfUrl}
-                style={{ width: '100%', height: '100%', border: 'none' }}
-                title="PDF Preview"
+              <PDFViewer
+                url={pdfUrl}
+                onDoubleClick={syncTeXData ? handlePDFDoubleClick : undefined}
               />
             ) : (
               <p style={styles.previewPlaceholder}>
@@ -482,6 +600,47 @@ export default function EditorPage() {
           </div>
         </aside>
       </div>
+
+      {/* New folder modal */}
+      {showNewFolderModal && (
+        <div
+          style={styles.modalOverlay}
+          onClick={() => setShowNewFolderModal(false)}
+        >
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ margin: '0 0 16px 0' }}>
+              New Folder{newFolderParent ? ` in ${newFolderParent}` : ''}
+            </h3>
+            <input
+              type="text"
+              placeholder="folder-name"
+              value={newFolderName}
+              onChange={(e) => setNewFolderName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submitCreateFolder()
+                if (e.key === 'Escape') setShowNewFolderModal(false)
+              }}
+              style={styles.modalInput}
+              autoFocus
+            />
+            <div style={styles.modalButtons}>
+              <button
+                className="secondary"
+                onClick={() => setShowNewFolderModal(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="primary"
+                onClick={submitCreateFolder}
+                disabled={!newFolderName.trim()}
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* New file modal */}
       {showNewFileModal && (
