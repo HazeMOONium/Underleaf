@@ -74,6 +74,9 @@ export const compileApi = {
 
   getLogs: (jobId: string) =>
     api.get<string>(`/compile/jobs/${jobId}/logs`),
+
+  getSyncTeX: (jobId: string) =>
+    api.get(`/compile/jobs/${jobId}/synctex`, { responseType: 'arraybuffer' }),
 }
 
 export default api
