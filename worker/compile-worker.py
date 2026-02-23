@@ -203,6 +203,7 @@ def run_compile(project_id: str) -> tuple[bool, str, str]:
         'pdflatex',
         '-interaction=nonstopmode',
         '-halt-on-error',
+        '-synctex=1',
         f'-output-directory={OUTPUT_DIR}',
         str(main_tex)
     ]
@@ -313,6 +314,19 @@ def callback(ch, method, properties, body):
                 ch.basic_ack(delivery_tag=method.delivery_tag)
                 cleanup_job(project_id)
                 return
+
+            # Upload SyncTeX file if present (best-effort)
+            tex_stem = Path(artifact_path).stem
+            synctex_path = Path(OUTPUT_DIR) / f"{tex_stem}.synctex.gz"
+            if synctex_path.exists():
+                try:
+                    upload_to_minio(
+                        f"artifacts/{job_id}/output.synctex.gz",
+                        synctex_path,
+                        content_type="application/gzip",
+                    )
+                except Exception as exc:
+                    print(f"Failed to upload synctex for job {job_id}: {exc}")
 
             # Update DB with success
             update_job_status(
