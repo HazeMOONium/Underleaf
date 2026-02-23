@@ -6,16 +6,20 @@ import type * as Monaco from 'monaco-editor'
 import * as Y from 'yjs'
 import { WebsocketProvider } from 'y-websocket'
 import { MonacoBinding } from 'y-monaco'
-import { projectsApi, compileApi } from '../services/api'
+import { projectsApi, compileApi, commentsApi } from '../services/api'
 import { useAuthStore } from '../stores/auth'
+import { useProjectRole } from '../hooks/useProjectRole'
 import FileTree from '../components/FileTree'
 import DocumentOutline from '../components/DocumentOutline'
 import PDFViewer from '../components/PDFViewer'
 import AIPanel from '../components/AIPanel'
+import CollabModal from '../components/CollabModal'
+import CommentsPanel from '../components/CommentsPanel'
 import { registerLatexLanguage, registerLatexDiagnostics } from '../editor/latexLanguage'
 import { parseSyncTeX, findSourceFromClick } from '../utils/synctexParser'
 import type { SyncTeXData } from '../utils/synctexParser'
 import { userColor } from '../utils/userColor'
+import { canEdit, canComment, canManageMembers } from '../types'
 import toast from 'react-hot-toast'
 
 const WS_URL =
@@ -53,6 +57,17 @@ export default function EditorPage() {
   const [selectedText, setSelectedText] = useState('')
   // true once the Monaco editor has mounted and editorRef.current is set
   const [editorMounted, setEditorMounted] = useState(false)
+  const [showCollabModal, setShowCollabModal] = useState(false)
+  const [showCommentsPanel, setShowCommentsPanel] = useState(false)
+  const [commentFocusLine, setCommentFocusLine] = useState<number | null>(null)
+
+  // Role-based access control
+  const myRole = useProjectRole(projectId)
+  const editorRole = myRole ? canEdit(myRole) : false
+  const commenterRole = myRole ? canComment(myRole) : false
+  // ownerRole available for future use (e.g. member management UI guard)
+  const _ownerRole = myRole ? canManageMembers(myRole) : false
+  void _ownerRole
 
   const queryClient = useQueryClient()
   const mountedRef = useRef(true)
@@ -281,12 +296,7 @@ export default function EditorPage() {
     URL.revokeObjectURL(url)
   }
 
-  const handleShare = () => {
-    navigator.clipboard
-      .writeText(window.location.href)
-      .then(() => toast.success('Project link copied!'))
-      .catch(() => toast.error('Could not copy link'))
-  }
+  const handleShare = () => setShowCollabModal(true)
 
   const compile = useMutation({
     mutationFn: () => compileApi.createJob(projectId!),
@@ -462,7 +472,47 @@ export default function EditorPage() {
     registerLatexLanguage(monaco)
   }
 
+  // Monaco gutter decorations for commented lines
+  const gutterDecorationsRef = useRef<Monaco.editor.IEditorDecorationsCollection | null>(null)
+
+  const { data: fileComments = [] } = useQuery({
+    queryKey: ['comments', projectId, currentFile],
+    queryFn: () => commentsApi.list(projectId!, currentFile).then((r) => r.data),
+    enabled: !!projectId && !!currentFile && commenterRole,
+    refetchInterval: 10_000,
+  })
+
+  const commentedLines = useMemo(() => {
+    const lines = new Set<number>()
+    fileComments.forEach((c) => lines.add(c.line))
+    return lines
+  }, [fileComments])
+
+  useEffect(() => {
+    const editor = editorRef.current
+    if (!editor || !editorMounted) return
+    const monaco = (window as any).monaco
+    if (!monaco) return
+
+    const decorations = Array.from(commentedLines).map((line) => ({
+      range: new monaco.Range(line, 1, line, 1),
+      options: {
+        glyphMarginClassName: 'comment-gutter-icon',
+        glyphMarginHoverMessage: { value: `Comments on line ${line}` },
+      },
+    }))
+
+    if (gutterDecorationsRef.current) {
+      gutterDecorationsRef.current.set(decorations)
+    } else {
+      gutterDecorationsRef.current = editor.createDecorationsCollection(decorations)
+    }
+  }, [commentedLines, editorMounted])
+
   const handleEditorMount: OnMount = (editor, monaco) => {
+    // expose monaco on window for the gutter decoration effect above
+    ;(window as any).monaco = monaco
+
     editorRef.current = editor
     // Clean up any previous diagnostics registration
     if (latexDiagnosticsCleanupRef.current) {
@@ -477,6 +527,18 @@ export default function EditorPage() {
         setSelectedText(editor.getModel()?.getValueInRange(sel) ?? '')
       } else {
         setSelectedText('')
+      }
+    })
+
+    // Gutter click → open comments panel at that line
+    editor.onMouseDown((e) => {
+      if (
+        e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN &&
+        e.target.position
+      ) {
+        const line = e.target.position.lineNumber
+        setCommentFocusLine(line)
+        setShowCommentsPanel(true)
       }
     })
 
@@ -538,9 +600,19 @@ export default function EditorPage() {
           </div>
         </div>
         <div style={styles.headerRight}>
-          <button className="secondary" onClick={handleShare} title="Copy project link">
+          <button className="secondary" onClick={handleShare} title="Manage collaborators">
             Share
           </button>
+          {commenterRole && (
+            <button
+              className="secondary"
+              onClick={() => setShowCommentsPanel((v) => !v)}
+              title="Comments"
+              style={showCommentsPanel ? { outline: '2px solid var(--color-primary)' } : {}}
+            >
+              💬 Comments
+            </button>
+          )}
           <button
             className="secondary"
             onClick={() => setShowAIPanel((v) => !v)}
@@ -552,20 +624,24 @@ export default function EditorPage() {
           <button className="secondary" onClick={handleDownload}>
             Download
           </button>
-          <button
-            className="secondary"
-            onClick={() => saveFile.mutate()}
-            disabled={saving}
-          >
-            {saving ? 'Saving...' : 'Save'}
-          </button>
-          <button
-            className="primary"
-            onClick={() => compile.mutate()}
-            disabled={compiling}
-          >
-            {compiling ? 'Compiling...' : 'Compile'}
-          </button>
+          {editorRole && (
+            <button
+              className="secondary"
+              onClick={() => saveFile.mutate()}
+              disabled={saving}
+            >
+              {saving ? 'Saving...' : 'Save'}
+            </button>
+          )}
+          {editorRole && (
+            <button
+              className="primary"
+              onClick={() => compile.mutate()}
+              disabled={compiling}
+            >
+              {compiling ? 'Compiling...' : 'Compile'}
+            </button>
+          )}
         </div>
       </header>
 
@@ -573,24 +649,26 @@ export default function EditorPage() {
         <aside style={styles.sidebar}>
           <div style={styles.sidebarHeader}>
             <h3>Files</h3>
-            <div style={{ display: 'flex', gap: '4px' }}>
-              <button
-                className="secondary"
-                style={styles.iconBtn}
-                onClick={() => handleCreateFolder('')}
-                title="New folder"
-              >
-                &#128193;
-              </button>
-              <button
-                className="secondary"
-                style={styles.iconBtn}
-                onClick={() => setShowNewFileModal(true)}
-                title="New file"
-              >
-                +
-              </button>
-            </div>
+            {editorRole && (
+              <div style={{ display: 'flex', gap: '4px' }}>
+                <button
+                  className="secondary"
+                  style={styles.iconBtn}
+                  onClick={() => handleCreateFolder('')}
+                  title="New folder"
+                >
+                  &#128193;
+                </button>
+                <button
+                  className="secondary"
+                  style={styles.iconBtn}
+                  onClick={() => setShowNewFileModal(true)}
+                  title="New file"
+                >
+                  +
+                </button>
+              </div>
+            )}
           </div>
           <div style={styles.sidebarContent}>
             {files && (
@@ -598,12 +676,11 @@ export default function EditorPage() {
                 files={files}
                 currentFile={currentFile}
                 onSelectFile={setCurrentFile}
-                onDeleteFile={(path) => deleteFileMutation.mutate(path)}
-                onRenameFile={(oldPath, newPath) =>
-                  renameFileMutation.mutate({ oldPath, newPath })
-                }
-                onNewFileInFolder={handleNewFileInFolder}
-                onCreateFolder={handleCreateFolder}
+                onDeleteFile={editorRole ? (path) => deleteFileMutation.mutate(path) : undefined}
+                onRenameFile={editorRole ? (oldPath, newPath) =>
+                  renameFileMutation.mutate({ oldPath, newPath }) : undefined}
+                onNewFileInFolder={editorRole ? handleNewFileInFolder : undefined}
+                onCreateFolder={editorRole ? handleCreateFolder : undefined}
                 onDownloadFile={handleDownloadFile}
               />
             )}
@@ -642,6 +719,16 @@ export default function EditorPage() {
             }}
           />
         </div>
+
+        {/* Comments panel — inline between editor and splitter */}
+        {showCommentsPanel && projectId && myRole && (
+          <CommentsPanel
+            projectId={projectId}
+            currentFile={currentFile}
+            focusLine={commentFocusLine}
+            role={myRole}
+          />
+        )}
 
         {/* Draggable splitter handle */}
         <div style={styles.splitter} onMouseDown={handleSplitterMouseDown} />
@@ -752,6 +839,12 @@ export default function EditorPage() {
             </div>
           </div>
         </div>
+      )}
+      {showCollabModal && projectId && (
+        <CollabModal
+          projectId={projectId}
+          onClose={() => setShowCollabModal(false)}
+        />
       )}
     </div>
   )

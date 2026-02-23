@@ -1,3 +1,4 @@
+import secrets
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Integer, Enum as SQLEnum, UniqueConstraint
@@ -23,6 +24,13 @@ class JobStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+class ProjectRole(str, enum.Enum):
+    OWNER = "owner"
+    EDITOR = "editor"
+    COMMENTER = "commenter"
+    VIEWER = "viewer"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -33,7 +41,7 @@ class User(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     projects = relationship("Project", back_populates="owner")
-    permissions = relationship("Permission", back_populates="user")
+    permissions = relationship("Permission", foreign_keys="Permission.user_id", back_populates="user")
 
 
 class Project(Base):
@@ -51,6 +59,8 @@ class Project(Base):
     files = relationship("ProjectFile", back_populates="project", cascade="all, delete-orphan")
     permissions = relationship("Permission", back_populates="project", cascade="all, delete-orphan")
     compile_jobs = relationship("CompileJob", back_populates="project", cascade="all, delete-orphan")
+    invites = relationship("ProjectInvite", back_populates="project", cascade="all, delete-orphan")
+    comments = relationship("Comment", back_populates="project", cascade="all, delete-orphan")
 
 
 class ProjectFile(Base):
@@ -74,10 +84,60 @@ class Permission(Base):
 
     project_id = Column(String, ForeignKey("projects.id"), primary_key=True)
     user_id = Column(String, ForeignKey("users.id"), primary_key=True)
-    role = Column(String, default="viewer")
+    role = Column(SQLEnum(ProjectRole), default=ProjectRole.VIEWER, nullable=False)
+    granted_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    granted_by = Column(String, ForeignKey("users.id"), nullable=True)
 
     project = relationship("Project", back_populates="permissions")
-    user = relationship("User", back_populates="permissions")
+    user = relationship("User", foreign_keys=[user_id], back_populates="permissions")
+    granter = relationship("User", foreign_keys=[granted_by])
+
+
+class ProjectInvite(Base):
+    __tablename__ = "project_invites"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String, ForeignKey("projects.id"), nullable=False)
+    token = Column(String, unique=True, nullable=False, index=True,
+                   default=lambda: secrets.token_urlsafe(32))
+    role = Column(SQLEnum(ProjectRole), nullable=False)
+    created_by = Column(String, ForeignKey("users.id"), nullable=False)
+    expires_at = Column(DateTime, nullable=True)
+    use_count = Column(Integer, default=0, nullable=False)
+    max_uses = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    project = relationship("Project", back_populates="invites")
+    creator = relationship("User", foreign_keys=[created_by])
+
+
+class Comment(Base):
+    __tablename__ = "comments"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String, ForeignKey("projects.id"), nullable=False)
+    file_path = Column(String, nullable=False)
+    line = Column(Integer, nullable=False)
+    author_id = Column(String, ForeignKey("users.id"), nullable=False)
+    content = Column(Text, nullable=False)
+    parent_id = Column(String, ForeignKey("comments.id"), nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    resolved_at = Column(DateTime, nullable=True)
+
+    project = relationship("Project", back_populates="comments")
+    author = relationship("User", foreign_keys=[author_id])
+    replies = relationship(
+        "Comment",
+        back_populates="parent",
+        foreign_keys="Comment.parent_id",
+        cascade="all, delete-orphan",
+    )
+    parent = relationship(
+        "Comment",
+        back_populates="replies",
+        remote_side="Comment.id",
+        foreign_keys="Comment.parent_id",
+    )
 
 
 class CompileJob(Base):

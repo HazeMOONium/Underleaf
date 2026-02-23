@@ -39,3 +39,68 @@ export interface Token {
   access_token: string
   token_type: string
 }
+
+// ── Collaboration ─────────────────────────────────────────────────────────
+
+export type ProjectRole = 'owner' | 'editor' | 'commenter' | 'viewer'
+
+export const ROLE_ORDER: Record<ProjectRole, number> = {
+  viewer: 0,
+  commenter: 1,
+  editor: 2,
+  owner: 3,
+}
+
+export function roleGte(a: ProjectRole, b: ProjectRole): boolean {
+  return ROLE_ORDER[a] >= ROLE_ORDER[b]
+}
+
+export function canEdit(role: ProjectRole): boolean {
+  return roleGte(role, 'editor')
+}
+
+export function canComment(role: ProjectRole): boolean {
+  return roleGte(role, 'commenter')
+}
+
+export function canManageMembers(role: ProjectRole): boolean {
+  return role === 'owner'
+}
+
+export interface Member {
+  user_id: string
+  email: string
+  role: ProjectRole
+  granted_at: string | null
+}
+
+export interface ProjectInvite {
+  id: string
+  token: string
+  role: ProjectRole
+  use_count: number
+  max_uses: number | null
+  expires_at: string | null
+  created_at: string
+}
+
+export interface InvitePreview {
+  project_id: string
+  project_title: string
+  role: ProjectRole
+  created_by_email: string
+}
+
+export interface Comment {
+  id: string
+  project_id: string
+  file_path: string
+  line: number
+  author_id: string
+  author_email: string
+  content: string
+  parent_id: string | null
+  created_at: string
+  resolved_at: string | null
+  replies: Comment[]
+}

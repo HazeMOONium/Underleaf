@@ -7,7 +7,7 @@ import time
 from app.core.config import get_settings
 from app.core.logging import get_logger, request_id_var
 from app.core.metrics import http_requests_total, http_request_duration_seconds, metrics
-from app.api.v1 import auth, projects, compile, ai
+from app.api.v1 import auth, projects, compile, ai, members, invites, comments
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -68,6 +68,10 @@ app.include_router(auth.router, prefix=settings.API_V1_PREFIX)
 app.include_router(projects.router, prefix=settings.API_V1_PREFIX)
 app.include_router(compile.router, prefix=settings.API_V1_PREFIX)
 app.include_router(ai.router, prefix=settings.API_V1_PREFIX)
+app.include_router(members.router, prefix=settings.API_V1_PREFIX)
+app.include_router(invites.project_invites_router, prefix=settings.API_V1_PREFIX)
+app.include_router(invites.public_invites_router, prefix=settings.API_V1_PREFIX)
+app.include_router(comments.router, prefix=settings.API_V1_PREFIX)
 
 
 @app.get("/health")

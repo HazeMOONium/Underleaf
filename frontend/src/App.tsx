@@ -4,6 +4,7 @@ import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import DashboardPage from './pages/DashboardPage'
 import EditorPage from './pages/EditorPage'
+import InviteAcceptPage from './pages/InviteAcceptPage'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { token } = useAuthStore()
@@ -31,6 +32,8 @@ function App() {
           </PrivateRoute>
         }
       />
+      {/* Public route — invite preview works without login */}
+      <Route path="/invite/:token" element={<InviteAcceptPage />} />
       <Route path="*" element={<Navigate to="/login" />} />
     </Routes>
   )

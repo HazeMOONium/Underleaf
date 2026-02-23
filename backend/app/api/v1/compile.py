@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.api.v1.auth import get_current_user
 from app.api.v1.projects import get_project_with_access
-from app.models.models import CompileJob, JobStatus, ProjectFile, User
+from app.models.models import CompileJob, JobStatus, ProjectFile, ProjectRole, User
 from app.schemas.compile import CompileJobCreate, CompileJobResponse
 from app.services.minio_service import minio_service
 from app.services.rabbitmq_service import rabbitmq_service, COMPILE_JOBS_QUEUE
@@ -23,8 +23,10 @@ async def create_compile_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    project = get_project_with_access(job_data.project_id, current_user.id, db)
-    
+    project, _ = get_project_with_access(
+        job_data.project_id, current_user.id, db, minimum_role=ProjectRole.EDITOR
+    )
+
     job = CompileJob(
         project_id=project.id,
         status=JobStatus.PENDING
@@ -78,7 +80,7 @@ def get_job(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    get_project_with_access(job.project_id, current_user.id, db)
+    get_project_with_access(job.project_id, current_user.id, db)  # type: ignore[misc]
     
     return job
 
@@ -93,7 +95,7 @@ def get_job_status(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    get_project_with_access(job.project_id, current_user.id, db)
+    get_project_with_access(job.project_id, current_user.id, db)  # type: ignore[misc]
     
     return {
         "id": job.id,
@@ -113,7 +115,7 @@ def get_job_artifact(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    get_project_with_access(job.project_id, current_user.id, db)
+    get_project_with_access(job.project_id, current_user.id, db)  # type: ignore[misc]
 
     if not job.artifact_ref:
         raise HTTPException(status_code=404, detail="No artifact available")
@@ -142,7 +144,7 @@ def get_job_synctex(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    get_project_with_access(job.project_id, current_user.id, db)
+    get_project_with_access(job.project_id, current_user.id, db)  # type: ignore[misc]
 
     synctex_ref = f"artifacts/{job_id}/output.synctex.gz"
     try:
@@ -170,7 +172,7 @@ def get_job_logs(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    get_project_with_access(job.project_id, current_user.id, db)
+    get_project_with_access(job.project_id, current_user.id, db)  # type: ignore[misc]
 
     if not job.logs_ref:
         raise HTTPException(status_code=404, detail="No logs available")

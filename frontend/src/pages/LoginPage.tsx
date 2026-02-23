@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '../stores/auth'
 import toast from 'react-hot-toast'
 
@@ -8,12 +8,14 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const { login, loading, fetchUser } = useAuthStore()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const nextPath = searchParams.get('next') ?? '/'
 
   useEffect(() => {
     fetchUser()
       .then(() => {
         if (localStorage.getItem('token')) {
-          navigate('/')
+          navigate(nextPath)
         }
       })
       .catch((err) => {
@@ -26,7 +28,7 @@ export default function LoginPage() {
     try {
       await login(email, password)
       toast.success('Logged in successfully')
-      navigate('/')
+      navigate(nextPath)
     } catch {
       toast.error('Invalid credentials')
     }

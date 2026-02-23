@@ -96,3 +96,16 @@ a:hover {
   box-shadow: var(--shadow-sm);
   padding: 20px;
 }
+
+/* Monaco gutter icon for lines with comments */
+.comment-gutter-icon {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='%231d4ed8' d='M2 2h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H9l-3 2v-2H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z'/%3E%3C/svg%3E");
+  background-size: 13px 13px;
+  background-repeat: no-repeat;
+  background-position: center;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.comment-gutter-icon:hover {
+  opacity: 1;
+}

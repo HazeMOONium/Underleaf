@@ -13,8 +13,8 @@ interface FileTreeProps {
   files: ProjectFile[]
   currentFile: string
   onSelectFile: (path: string) => void
-  onDeleteFile: (path: string) => void
-  onRenameFile: (oldPath: string, newPath: string) => void
+  onDeleteFile?: (path: string) => void
+  onRenameFile?: (oldPath: string, newPath: string) => void
   onNewFileInFolder?: (folderPath: string) => void
   onCreateFolder?: (parentFolderPath: string) => void
   onDownloadFile?: (path: string) => void
@@ -160,15 +160,17 @@ export default function FileTree({
         >
           {ctxMenu.node.type === 'file' ? (
             <>
-              <button
-                style={styles.ctxItem}
-                onClick={() => {
-                  setRenamingPath(ctxMenu.node.path)
-                  closeMenu()
-                }}
-              >
-                Rename
-              </button>
+              {onRenameFile && (
+                <button
+                  style={styles.ctxItem}
+                  onClick={() => {
+                    setRenamingPath(ctxMenu.node.path)
+                    closeMenu()
+                  }}
+                >
+                  Rename
+                </button>
+              )}
               {onDownloadFile && (
                 <button
                   style={styles.ctxItem}
@@ -180,7 +182,7 @@ export default function FileTree({
                   Download
                 </button>
               )}
-              {ctxMenu.node.path !== 'main.tex' && (
+              {onDeleteFile && ctxMenu.node.path !== 'main.tex' && (
                 <>
                   <div style={styles.ctxDivider} />
                   <button
@@ -221,16 +223,20 @@ export default function FileTree({
                   New Subfolder
                 </button>
               )}
-              <div style={styles.ctxDivider} />
-              <button
-                style={styles.ctxItem}
-                onClick={() => {
-                  setRenamingPath(ctxMenu.node.path)
-                  closeMenu()
-                }}
-              >
-                Rename
-              </button>
+              {onRenameFile && (
+                <>
+                  <div style={styles.ctxDivider} />
+                  <button
+                    style={styles.ctxItem}
+                    onClick={() => {
+                      setRenamingPath(ctxMenu.node.path)
+                      closeMenu()
+                    }}
+                  >
+                    Rename
+                  </button>
+                </>
+              )}
             </>
           )}
         </div>
@@ -254,8 +260,8 @@ function TreeNode({
   node: FileTreeNode
   currentFile: string
   onSelectFile: (path: string) => void
-  onDeleteFile: (path: string) => void
-  onRenameFile: (oldPath: string, newPath: string) => void
+  onDeleteFile?: (path: string) => void
+  onRenameFile?: (oldPath: string, newPath: string) => void
   onNewFileInFolder?: (folderPath: string) => void
   onContextMenu: (x: number, y: number, node: FileTreeNode) => void
   depth: number
@@ -284,7 +290,7 @@ function TreeNode({
 
   const submitRename = () => {
     const trimmed = renameName.trim()
-    if (trimmed && trimmed !== node.name) {
+    if (trimmed && trimmed !== node.name && onRenameFile) {
       const parts = node.path.split('/')
       parts[parts.length - 1] = trimmed
       onRenameFile(node.path, parts.join('/'))
@@ -373,7 +379,7 @@ function TreeNode({
         }}
         onClick={() => onSelectFile(node.path)}
         onDoubleClick={() => {
-          if (!isMainTex) {
+          if (!isMainTex && onRenameFile) {
             setRenameName(node.name)
             setRenamingPath(node.path)
           }
@@ -397,7 +403,7 @@ function TreeNode({
           <>
             <span style={styles.fileIcon}>{'\u2630'}</span>
             <span style={styles.nodeFileName}>{node.name}</span>
-            {!isMainTex && (
+            {!isMainTex && onDeleteFile && (
               <button
                 style={styles.treeActionBtn}
                 onClick={(e) => {

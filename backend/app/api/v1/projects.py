@@ -1,13 +1,13 @@
 import logging
+from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
-from typing import List
 
 from app.core.database import get_db
 from app.api.v1.auth import get_current_user
-from app.models.models import Project, ProjectFile, Permission, User
+from app.models.models import Project, ProjectFile, Permission, User, ProjectRole
 from app.schemas.project import (
     ProjectCreate,
     ProjectUpdate,
@@ -22,36 +22,67 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
+_ROLE_ORDER = {
+    ProjectRole.VIEWER: 0,
+    ProjectRole.COMMENTER: 1,
+    ProjectRole.EDITOR: 2,
+    ProjectRole.OWNER: 3,
+}
 
-def get_project_with_access(project_id: str, user_id: str, db: Session):
+
+def _role_gte(a: ProjectRole, b: ProjectRole) -> bool:
+    return _ROLE_ORDER[a] >= _ROLE_ORDER[b]
+
+
+def get_project_with_access(
+    project_id: str,
+    user_id: str,
+    db: Session,
+    minimum_role: Optional[ProjectRole] = None,
+) -> Tuple[Project, ProjectRole]:
+    """Return (project, effective_role) or raise 403/404.
+
+    Pass minimum_role to enforce a capability requirement in one call, e.g.::
+
+        project, role = get_project_with_access(
+            project_id, current_user.id, db, minimum_role=ProjectRole.EDITOR
+        )
+    """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
     if project.owner_id == user_id:
-        return project
+        effective_role = ProjectRole.OWNER
+    else:
+        permission = (
+            db.query(Permission)
+            .filter(
+                Permission.project_id == project_id,
+                Permission.user_id == user_id,
+            )
+            .first()
+        )
+        if not permission:
+            raise HTTPException(status_code=403, detail="Access denied")
+        effective_role = permission.role
 
-    permission = db.query(Permission).filter(
-        Permission.project_id == project_id,
-        Permission.user_id == user_id
-    ).first()
+    if minimum_role is not None and not _role_gte(effective_role, minimum_role):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    if not permission:
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    return project
+    return project, effective_role
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 def create_project(
     project_data: ProjectCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     project = Project(
         owner_id=current_user.id,
         title=project_data.title,
-        visibility=project_data.visibility
+        visibility=project_data.visibility,
     )
     db.add(project)
     db.commit()
@@ -62,13 +93,12 @@ def create_project(
 @router.get("", response_model=List[ProjectResponse])
 def list_projects(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     owned = db.query(Project).filter(Project.owner_id == current_user.id).all()
     permissions = db.query(Permission).filter(Permission.user_id == current_user.id).all()
     shared_ids = [p.project_id for p in permissions]
     shared = db.query(Project).filter(Project.id.in_(shared_ids)).all() if shared_ids else []
-
     return owned + shared
 
 
@@ -76,9 +106,10 @@ def list_projects(
 def get_project(
     project_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    return get_project_with_access(project_id, current_user.id, db)
+    project, _ = get_project_with_access(project_id, current_user.id, db)
+    return project
 
 
 @router.patch("/{project_id}", response_model=ProjectResponse)
@@ -86,20 +117,17 @@ def update_project(
     project_id: str,
     project_data: ProjectUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    project = get_project_with_access(project_id, current_user.id, db)
-
-    if project.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Only owner can update project")
-
+    project, _ = get_project_with_access(
+        project_id, current_user.id, db, minimum_role=ProjectRole.OWNER
+    )
     if project_data.title is not None:
         project.title = project_data.title
     if project_data.visibility is not None:
         project.visibility = project_data.visibility
     if project_data.settings is not None:
         project.settings = project_data.settings
-
     db.commit()
     db.refresh(project)
     return project
@@ -109,13 +137,11 @@ def update_project(
 def delete_project(
     project_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    project = get_project_with_access(project_id, current_user.id, db)
-
-    if project.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Only owner can delete project")
-
+    project, _ = get_project_with_access(
+        project_id, current_user.id, db, minimum_role=ProjectRole.OWNER
+    )
     db.delete(project)
     db.commit()
     return None
@@ -125,26 +151,36 @@ def delete_project(
 def list_files(
     project_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     get_project_with_access(project_id, current_user.id, db)
     files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
     return files
 
 
-@router.post("/{project_id}/files", response_model=ProjectFileResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/{project_id}/files",
+    response_model=ProjectFileResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 def create_file(
     project_id: str,
     file_data: ProjectFileBase,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    get_project_with_access(project_id, current_user.id, db)
+    get_project_with_access(
+        project_id, current_user.id, db, minimum_role=ProjectRole.EDITOR
+    )
 
-    existing = db.query(ProjectFile).filter(
-        ProjectFile.project_id == project_id,
-        ProjectFile.path == file_data.path
-    ).first()
+    existing = (
+        db.query(ProjectFile)
+        .filter(
+            ProjectFile.project_id == project_id,
+            ProjectFile.path == file_data.path,
+        )
+        .first()
+    )
 
     bucket = minio_service._default_bucket
 
@@ -171,7 +207,7 @@ def create_file(
         project_id=project_id,
         path=file_data.path,
         blob_ref=blob_ref,
-        size=len(content)
+        size=len(content),
     )
     db.add(file)
     db.commit()
@@ -184,13 +220,17 @@ def get_file(
     project_id: str,
     file_path: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     get_project_with_access(project_id, current_user.id, db)
-    file = db.query(ProjectFile).filter(
-        ProjectFile.project_id == project_id,
-        ProjectFile.path == file_path
-    ).first()
+    file = (
+        db.query(ProjectFile)
+        .filter(
+            ProjectFile.project_id == project_id,
+            ProjectFile.path == file_path,
+        )
+        .first()
+    )
 
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
@@ -206,7 +246,9 @@ def get_file(
         raise HTTPException(status_code=500, detail=f"Failed to fetch file: {str(e)}")
 
 
-@router.patch("/{project_id}/files/{file_path:path}", response_model=ProjectFileResponse)
+@router.patch(
+    "/{project_id}/files/{file_path:path}", response_model=ProjectFileResponse
+)
 def rename_file(
     project_id: str,
     file_path: str,
@@ -214,12 +256,18 @@ def rename_file(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    get_project_with_access(project_id, current_user.id, db)
+    get_project_with_access(
+        project_id, current_user.id, db, minimum_role=ProjectRole.EDITOR
+    )
 
-    file = db.query(ProjectFile).filter(
-        ProjectFile.project_id == project_id,
-        ProjectFile.path == file_path,
-    ).first()
+    file = (
+        db.query(ProjectFile)
+        .filter(
+            ProjectFile.project_id == project_id,
+            ProjectFile.path == file_path,
+        )
+        .first()
+    )
 
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
@@ -228,12 +276,18 @@ def rename_file(
     if not new_path:
         raise HTTPException(status_code=400, detail="New path cannot be empty")
 
-    conflict = db.query(ProjectFile).filter(
-        ProjectFile.project_id == project_id,
-        ProjectFile.path == new_path,
-    ).first()
+    conflict = (
+        db.query(ProjectFile)
+        .filter(
+            ProjectFile.project_id == project_id,
+            ProjectFile.path == new_path,
+        )
+        .first()
+    )
     if conflict:
-        raise HTTPException(status_code=409, detail="A file already exists at the target path")
+        raise HTTPException(
+            status_code=409, detail="A file already exists at the target path"
+        )
 
     bucket = minio_service._default_bucket
     new_blob_ref = f"{project_id}/{new_path}"
@@ -244,7 +298,9 @@ def rename_file(
             minio_service.upload_file(bucket, new_blob_ref, content)
             minio_service.delete_file(bucket, file.blob_ref)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to rename file in storage: {str(e)}")
+            raise HTTPException(
+                status_code=500, detail=f"Failed to rename file in storage: {str(e)}"
+            )
 
     file.path = new_path
     file.blob_ref = new_blob_ref
@@ -253,18 +309,27 @@ def rename_file(
     return file
 
 
-@router.delete("/{project_id}/files/{file_path:path}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{project_id}/files/{file_path:path}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 def delete_file(
     project_id: str,
     file_path: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    get_project_with_access(project_id, current_user.id, db)
-    file = db.query(ProjectFile).filter(
-        ProjectFile.project_id == project_id,
-        ProjectFile.path == file_path
-    ).first()
+    get_project_with_access(
+        project_id, current_user.id, db, minimum_role=ProjectRole.EDITOR
+    )
+    file = (
+        db.query(ProjectFile)
+        .filter(
+            ProjectFile.project_id == project_id,
+            ProjectFile.path == file_path,
+        )
+        .first()
+    )
 
     if not file:
         raise HTTPException(status_code=404, detail="File not found")

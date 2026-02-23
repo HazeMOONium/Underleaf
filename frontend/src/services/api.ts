@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { User, Project, ProjectFile, CompileJob, Token } from '../types'
+import type { User, Project, ProjectFile, CompileJob, Token, Member, ProjectInvite, InvitePreview, Comment } from '../types'
 
 const api = axios.create({
   baseURL: '/api/v1',
@@ -77,6 +77,71 @@ export const compileApi = {
 
   getSyncTeX: (jobId: string) =>
     api.get(`/compile/jobs/${jobId}/synctex`, { responseType: 'arraybuffer' }),
+}
+
+export const membersApi = {
+  list: (projectId: string) =>
+    api.get<Member[]>(`/projects/${projectId}/members`),
+
+  add: (projectId: string, email: string, role: string) =>
+    api.post<Member>(`/projects/${projectId}/members`, { email, role }),
+
+  update: (projectId: string, userId: string, role: string) =>
+    api.patch<Member>(`/projects/${projectId}/members/${userId}`, { role }),
+
+  remove: (projectId: string, userId: string) =>
+    api.delete(`/projects/${projectId}/members/${userId}`),
+}
+
+export const invitesApi = {
+  list: (projectId: string) =>
+    api.get<ProjectInvite[]>(`/projects/${projectId}/invites`),
+
+  create: (projectId: string, role: string, maxUses?: number, expiresHours?: number) =>
+    api.post<ProjectInvite>(`/projects/${projectId}/invites`, {
+      role,
+      max_uses: maxUses ?? null,
+      expires_hours: expiresHours ?? null,
+    }),
+
+  revoke: (projectId: string, inviteId: string) =>
+    api.delete(`/projects/${projectId}/invites/${inviteId}`),
+
+  preview: (token: string) =>
+    api.get<InvitePreview>(`/invites/${token}`),
+
+  accept: (token: string) =>
+    api.post<Member>(`/invites/${token}/accept`),
+}
+
+export const commentsApi = {
+  list: (projectId: string, filePath?: string) =>
+    api.get<Comment[]>(`/projects/${projectId}/comments`, {
+      params: filePath ? { file_path: filePath } : {},
+    }),
+
+  create: (
+    projectId: string,
+    filePath: string,
+    line: number,
+    content: string,
+    parentId?: string,
+  ) =>
+    api.post<Comment>(`/projects/${projectId}/comments`, {
+      file_path: filePath,
+      line,
+      content,
+      parent_id: parentId ?? null,
+    }),
+
+  update: (
+    projectId: string,
+    commentId: string,
+    patch: { content?: string; resolved?: boolean },
+  ) => api.patch<Comment>(`/projects/${projectId}/comments/${commentId}`, patch),
+
+  delete: (projectId: string, commentId: string) =>
+    api.delete(`/projects/${projectId}/comments/${commentId}`),
 }
 
 export default api
