@@ -142,9 +142,28 @@ services:
     volumes:
       - worker_sandbox:/sandbox
 
+  frontend:
+    image: node:20-alpine
+    container_name: underleaf-frontend
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+      - collab-server
+    environment:
+      # Inside Docker, proxy to container names instead of localhost ports
+      - VITE_API_TARGET=http://backend:8000
+      - VITE_COLLAB_TARGET=ws://collab-server:1234
+    volumes:
+      - ../frontend:/app
+      - frontend_node_modules:/app/node_modules
+
 volumes:
   postgres_data:
   minio_data:
   rabbitmq_data:
   worker_sandbox:
   collab_node_modules:
+  frontend_node_modules:
