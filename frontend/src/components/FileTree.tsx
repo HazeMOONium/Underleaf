@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import type { ProjectFile } from '../types'
 
 interface FileTreeNode {
@@ -16,6 +16,14 @@ interface FileTreeProps {
   onDeleteFile: (path: string) => void
   onRenameFile: (oldPath: string, newPath: string) => void
   onNewFileInFolder?: (folderPath: string) => void
+  onCreateFolder?: (parentFolderPath: string) => void
+  onDownloadFile?: (path: string) => void
+}
+
+interface CtxMenu {
+  x: number
+  y: number
+  node: FileTreeNode
 }
 
 function buildFileTree(files: ProjectFile[]): FileTreeNode[] {
@@ -87,24 +95,147 @@ export default function FileTree({
   onDeleteFile,
   onRenameFile,
   onNewFileInFolder,
+  onCreateFolder,
+  onDownloadFile,
 }: FileTreeProps) {
   const tree = buildFileTree(files)
+  const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null)
+  const [renamingPath, setRenamingPath] = useState<string | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  // Close context menu on outside click or Escape
+  useEffect(() => {
+    if (!ctxMenu) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCtxMenu(null)
+    }
+    const onMouseDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setCtxMenu(null)
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', onMouseDown)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', onMouseDown)
+    }
+  }, [ctxMenu])
+
+  const handleContextMenu = useCallback((x: number, y: number, node: FileTreeNode) => {
+    setCtxMenu({ x, y, node })
+  }, [])
+
+  const closeMenu = () => setCtxMenu(null)
 
   return (
-    <ul style={styles.list}>
-      {tree.map((node) => (
-        <TreeNode
-          key={node.path}
-          node={node}
-          currentFile={currentFile}
-          onSelectFile={onSelectFile}
-          onDeleteFile={onDeleteFile}
-          onRenameFile={onRenameFile}
-          onNewFileInFolder={onNewFileInFolder}
-          depth={0}
-        />
-      ))}
-    </ul>
+    <>
+      <ul style={styles.list}>
+        {tree.map((node) => (
+          <TreeNode
+            key={node.path}
+            node={node}
+            currentFile={currentFile}
+            onSelectFile={onSelectFile}
+            onDeleteFile={onDeleteFile}
+            onRenameFile={onRenameFile}
+            onNewFileInFolder={onNewFileInFolder}
+            onContextMenu={handleContextMenu}
+            depth={0}
+            renamingPath={renamingPath}
+            setRenamingPath={setRenamingPath}
+          />
+        ))}
+      </ul>
+
+      {/* Right-click context menu */}
+      {ctxMenu && (
+        <div
+          ref={menuRef}
+          style={{
+            ...styles.ctxMenu,
+            top: ctxMenu.y,
+            left: ctxMenu.x,
+          }}
+        >
+          {ctxMenu.node.type === 'file' ? (
+            <>
+              <button
+                style={styles.ctxItem}
+                onClick={() => {
+                  setRenamingPath(ctxMenu.node.path)
+                  closeMenu()
+                }}
+              >
+                Rename
+              </button>
+              {onDownloadFile && (
+                <button
+                  style={styles.ctxItem}
+                  onClick={() => {
+                    onDownloadFile(ctxMenu.node.path)
+                    closeMenu()
+                  }}
+                >
+                  Download
+                </button>
+              )}
+              {ctxMenu.node.path !== 'main.tex' && (
+                <>
+                  <div style={styles.ctxDivider} />
+                  <button
+                    style={{ ...styles.ctxItem, ...styles.ctxItemDanger }}
+                    onClick={() => {
+                      if (window.confirm(`Delete "${ctxMenu.node.path}"?`)) {
+                        onDeleteFile(ctxMenu.node.path)
+                      }
+                      closeMenu()
+                    }}
+                  >
+                    Delete
+                  </button>
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              {onNewFileInFolder && (
+                <button
+                  style={styles.ctxItem}
+                  onClick={() => {
+                    onNewFileInFolder(ctxMenu.node.path)
+                    closeMenu()
+                  }}
+                >
+                  New File Here
+                </button>
+              )}
+              {onCreateFolder && (
+                <button
+                  style={styles.ctxItem}
+                  onClick={() => {
+                    onCreateFolder(ctxMenu.node.path)
+                    closeMenu()
+                  }}
+                >
+                  New Subfolder
+                </button>
+              )}
+              <div style={styles.ctxDivider} />
+              <button
+                style={styles.ctxItem}
+                onClick={() => {
+                  setRenamingPath(ctxMenu.node.path)
+                  closeMenu()
+                }}
+              >
+                Rename
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </>
   )
 }
 
@@ -115,7 +246,10 @@ function TreeNode({
   onDeleteFile,
   onRenameFile,
   onNewFileInFolder,
+  onContextMenu,
   depth,
+  renamingPath,
+  setRenamingPath,
 }: {
   node: FileTreeNode
   currentFile: string
@@ -123,26 +257,30 @@ function TreeNode({
   onDeleteFile: (path: string) => void
   onRenameFile: (oldPath: string, newPath: string) => void
   onNewFileInFolder?: (folderPath: string) => void
+  onContextMenu: (x: number, y: number, node: FileTreeNode) => void
   depth: number
+  renamingPath: string | null
+  setRenamingPath: (path: string | null) => void
 }) {
   const [expanded, setExpanded] = useState(true)
-  const [renaming, setRenaming] = useState(false)
   const [renameName, setRenameName] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
   const isMainTex = node.path === 'main.tex'
+  const isRenaming = renamingPath === node.path
 
+  // Autofocus rename input when this node enters rename mode
   useEffect(() => {
-    if (renaming && inputRef.current) {
-      inputRef.current.focus()
-      const dotIdx = renameName.lastIndexOf('.')
-      inputRef.current.setSelectionRange(0, dotIdx > 0 ? dotIdx : renameName.length)
+    if (isRenaming) {
+      setRenameName(node.name)
+      requestAnimationFrame(() => {
+        if (inputRef.current) {
+          inputRef.current.focus()
+          const dotIdx = node.name.lastIndexOf('.')
+          inputRef.current.setSelectionRange(0, dotIdx > 0 ? dotIdx : node.name.length)
+        }
+      })
     }
-  }, [renaming])
-
-  const startRename = () => {
-    setRenameName(node.name)
-    setRenaming(true)
-  }
+  }, [isRenaming, node.name])
 
   const submitRename = () => {
     const trimmed = renameName.trim()
@@ -151,7 +289,13 @@ function TreeNode({
       parts[parts.length - 1] = trimmed
       onRenameFile(node.path, parts.join('/'))
     }
-    setRenaming(false)
+    setRenamingPath(null)
+  }
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    onContextMenu(e.clientX, e.clientY, node)
   }
 
   if (node.type === 'folder') {
@@ -160,20 +304,38 @@ function TreeNode({
         <div
           style={{ ...styles.row, paddingLeft: `${12 + depth * 16}px` }}
           onClick={() => setExpanded(!expanded)}
+          onContextMenu={handleContextMenu}
         >
-          <span style={styles.folderIcon}>{expanded ? '\u25BE' : '\u25B8'}</span>
-          <span style={styles.folderName}>{node.name}</span>
-          {onNewFileInFolder && (
-            <button
-              style={styles.treeActionBtn}
-              onClick={(e) => {
-                e.stopPropagation()
-                onNewFileInFolder(node.path)
+          {isRenaming ? (
+            <input
+              ref={inputRef}
+              value={renameName}
+              onChange={(e) => setRenameName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submitRename()
+                if (e.key === 'Escape') setRenamingPath(null)
               }}
-              title="New file here"
-            >
-              +
-            </button>
+              onBlur={submitRename}
+              onClick={(e) => e.stopPropagation()}
+              style={styles.renameInput}
+            />
+          ) : (
+            <>
+              <span style={styles.folderIcon}>{expanded ? '\u25BE' : '\u25B8'}</span>
+              <span style={styles.folderName}>{node.name}</span>
+              {onNewFileInFolder && (
+                <button
+                  style={styles.treeActionBtn}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onNewFileInFolder(node.path)
+                  }}
+                  title="New file here"
+                >
+                  +
+                </button>
+              )}
+            </>
           )}
         </div>
         {expanded && (
@@ -187,7 +349,10 @@ function TreeNode({
                 onDeleteFile={onDeleteFile}
                 onRenameFile={onRenameFile}
                 onNewFileInFolder={onNewFileInFolder}
+                onContextMenu={onContextMenu}
                 depth={depth + 1}
+                renamingPath={renamingPath}
+                setRenamingPath={setRenamingPath}
               />
             ))}
           </ul>
@@ -208,17 +373,21 @@ function TreeNode({
         }}
         onClick={() => onSelectFile(node.path)}
         onDoubleClick={() => {
-          if (!isMainTex) startRename()
+          if (!isMainTex) {
+            setRenameName(node.name)
+            setRenamingPath(node.path)
+          }
         }}
+        onContextMenu={handleContextMenu}
       >
-        {renaming ? (
+        {isRenaming ? (
           <input
             ref={inputRef}
             value={renameName}
             onChange={(e) => setRenameName(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') submitRename()
-              if (e.key === 'Escape') setRenaming(false)
+              if (e.key === 'Escape') setRenamingPath(null)
             }}
             onBlur={submitRename}
             onClick={(e) => e.stopPropagation()}
@@ -314,5 +483,34 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '2px',
     outline: 'none',
     minWidth: 0,
+  },
+  ctxMenu: {
+    position: 'fixed' as const,
+    zIndex: 9999,
+    backgroundColor: 'var(--color-surface)',
+    border: '1px solid var(--color-border)',
+    borderRadius: '6px',
+    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+    padding: '4px 0',
+    minWidth: '140px',
+  },
+  ctxItem: {
+    display: 'block',
+    width: '100%',
+    padding: '7px 14px',
+    background: 'none',
+    border: 'none',
+    textAlign: 'left' as const,
+    fontSize: '13px',
+    cursor: 'pointer',
+    color: 'var(--color-text)',
+  },
+  ctxItemDanger: {
+    color: '#dc2626',
+  },
+  ctxDivider: {
+    height: '1px',
+    backgroundColor: 'var(--color-border)',
+    margin: '4px 0',
   },
 }
