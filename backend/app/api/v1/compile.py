@@ -132,6 +132,34 @@ def get_job_artifact(
         raise HTTPException(status_code=500, detail="Failed to retrieve artifact")
 
 
+@router.get("/jobs/{job_id}/synctex")
+def get_job_synctex(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    job = db.query(CompileJob).filter(CompileJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    get_project_with_access(job.project_id, current_user.id, db)
+
+    synctex_ref = f"artifacts/{job_id}/output.synctex.gz"
+    try:
+        bucket = minio_service._default_bucket
+        synctex_bytes = minio_service.download_file(bucket, synctex_ref)
+        from io import BytesIO
+        from fastapi.responses import Response
+        return Response(
+            content=synctex_bytes,
+            media_type="application/gzip",
+            headers={"Content-Disposition": "inline; filename=output.synctex.gz"},
+        )
+    except Exception as e:
+        logger.warning(f"SyncTeX not available for job {job_id}: {e}")
+        raise HTTPException(status_code=404, detail="SyncTeX data not available")
+
+
 @router.get("/jobs/{job_id}/logs")
 def get_job_logs(
     job_id: str,
