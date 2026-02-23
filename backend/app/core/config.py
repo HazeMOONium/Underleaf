@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     MINIO_BUCKET: str = "underleaf-files"
     MINIO_SECURE: bool = False
 
+    # AI
+    ANTHROPIC_API_KEY: str = ""
+
     # RabbitMQ
     RABBITMQ_HOST: str = "localhost"
     RABBITMQ_PORT: int = 5672
