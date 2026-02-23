@@ -5,6 +5,7 @@ import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react'
 import type * as Monaco from 'monaco-editor'
 import * as Y from 'yjs'
 import { WebsocketProvider } from 'y-websocket'
+import { MonacoBinding } from 'y-monaco'
 import { projectsApi, compileApi } from '../services/api'
 import { useAuthStore } from '../stores/auth'
 import FileTree from '../components/FileTree'
@@ -29,6 +30,8 @@ interface AwarenessUser {
 export default function EditorPage() {
   const { projectId } = useParams<{ projectId: string }>()
   const { user } = useAuthStore()
+  // content state is kept in sync with the active ytext via observer
+  // so AI panel, outline, and save always see current content
   const [content, setContent] = useState('')
   const [saving, setSaving] = useState(false)
   const [compiling, setCompiling] = useState(false)
@@ -48,12 +51,24 @@ export default function EditorPage() {
   const [connectedUsers, setConnectedUsers] = useState<AwarenessUser[]>([])
   const [showAIPanel, setShowAIPanel] = useState(false)
   const [selectedText, setSelectedText] = useState('')
+  // true once the Monaco editor has mounted and editorRef.current is set
+  const [editorMounted, setEditorMounted] = useState(false)
+
   const queryClient = useQueryClient()
   const mountedRef = useRef(true)
-  const ytextRef = useRef<Y.Text | null>(null)
   const isDraggingRef = useRef(false)
   const saveRef = useRef<() => void>(() => {})
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
+  const latexDiagnosticsCleanupRef = useRef<(() => void) | null>(null)
+
+  // Yjs document and provider — live for the lifetime of the project page
+  const ydocRef = useRef<Y.Doc | null>(null)
+  const providerRef = useRef<WebsocketProvider | null>(null)
+  // MonacoBinding — recreated on every file switch
+  const bindingRef = useRef<MonacoBinding | null>(null)
+  // Reference to the active ytext observer so we can unobserve on cleanup
+  const ytextObserverRef = useRef<(() => void) | null>(null)
+  const ytextRef = useRef<Y.Text | null>(null)
 
   useEffect(() => {
     mountedRef.current = true
@@ -76,41 +91,136 @@ export default function EditorPage() {
     enabled: !!projectId,
   })
 
-  // Load file content from backend when currentFile changes
+  // ── Project-level Yjs setup ──────────────────────────────────────────────
+  // Create one ydoc + WebSocket provider per project. They live until the
+  // user navigates away. Per-file MonacoBindings are created separately.
   useEffect(() => {
-    if (!projectId || !currentFile) return
+    if (!projectId) return
+
+    const ydoc = new Y.Doc()
+    const provider = new WebsocketProvider(WS_URL, projectId, ydoc)
+    ydocRef.current = ydoc
+    providerRef.current = provider
+
+    if (user) {
+      provider.awareness.setLocalStateField('user', {
+        name: user.email,
+        color: userColor(user.id),
+      })
+    }
+
+    const updateUsers = () => {
+      const states = provider.awareness.getStates()
+      const users: AwarenessUser[] = []
+      states.forEach((state, clientId) => {
+        if (clientId !== provider.awareness.clientID && state.user) {
+          users.push(state.user as AwarenessUser)
+        }
+      })
+      if (mountedRef.current) setConnectedUsers(users)
+    }
+
+    provider.awareness.on('change', updateUsers)
+    updateUsers()
+
+    return () => {
+      provider.awareness.off('change', updateUsers)
+      // Destroy the per-file binding first before tearing down the provider
+      bindingRef.current?.destroy()
+      bindingRef.current = null
+      if (ytextObserverRef.current && ytextRef.current) {
+        ytextRef.current.unobserve(ytextObserverRef.current)
+        ytextObserverRef.current = null
+      }
+      provider.destroy()
+      ydoc.destroy()
+      ydocRef.current = null
+      providerRef.current = null
+      setConnectedUsers([])
+    }
+  }, [projectId, user])
+
+  // ── Per-file MonacoBinding ───────────────────────────────────────────────
+  // Recreated whenever the active file changes or the editor first mounts.
+  // Uses a unique Y.Text key per file so each file has its own CRDT state.
+  useEffect(() => {
+    const editor = editorRef.current
+    const ydoc = ydocRef.current
+    const provider = providerRef.current
+    if (!editor || !ydoc || !provider || !projectId || !currentFile) return
+
+    // Clean up previous binding and observer
+    bindingRef.current?.destroy()
+    bindingRef.current = null
+    if (ytextObserverRef.current && ytextRef.current) {
+      ytextRef.current.unobserve(ytextObserverRef.current)
+      ytextObserverRef.current = null
+    }
+
+    const ytext = ydoc.getText(currentFile)
+    ytextRef.current = ytext
+
     let cancelled = false
 
-    projectsApi
-      .getFile(projectId, currentFile)
-      .then((res) => {
-        if (cancelled) return
-        const fileContent =
-          typeof res.data === 'string'
-            ? res.data
-            : ((res.data as any)?.content ?? '')
-        setContent(fileContent)
-        if (ytextRef.current) {
-          const ytext = ytextRef.current
-          if (ytext.toString() !== fileContent) {
-            ytext.doc?.transact(() => {
-              ytext.delete(0, ytext.length)
+    const setup = async () => {
+      // If ytext is empty (first user to open this file), seed it from the backend
+      if (ytext.length === 0) {
+        try {
+          const res = await projectsApi.getFile(projectId, currentFile)
+          if (cancelled) return
+          const fileContent =
+            typeof res.data === 'string'
+              ? res.data
+              : ((res.data as { content?: string })?.content ?? '')
+          // Guard: only insert if ytext is still empty (avoid race with another user)
+          if (fileContent && ytext.length === 0) {
+            ydoc.transact(() => {
               ytext.insert(0, fileContent)
             })
           }
+        } catch {
+          // File might not exist yet — start with empty ytext
         }
-      })
-      .catch(() => {
-        if (!cancelled) setContent('')
-      })
+      }
+
+      if (cancelled) return
+
+      const model = editor.getModel()
+      if (!model) return
+
+      // MonacoBinding syncs ytext ↔ Monaco model bidirectionally.
+      // On construction it also calls model.setValue(ytext.toString()) so the
+      // editor immediately shows the correct file content.
+      const binding = new MonacoBinding(ytext, model, new Set([editor]), provider.awareness)
+      bindingRef.current = binding
+
+      // Mirror ytext into the content state for AI panel / outline / save
+      const syncContent = () => {
+        if (mountedRef.current) setContent(ytext.toString())
+      }
+      ytext.observe(syncContent)
+      ytextObserverRef.current = syncContent
+      setContent(ytext.toString())
+    }
+
+    setup().catch(console.error)
 
     return () => {
       cancelled = true
+      bindingRef.current?.destroy()
+      bindingRef.current = null
+      if (ytextObserverRef.current && ytextRef.current) {
+        ytextRef.current.unobserve(ytextObserverRef.current)
+        ytextObserverRef.current = null
+      }
     }
-  }, [projectId, currentFile, files])
+  }, [currentFile, editorMounted, projectId])
 
   const saveFile = useMutation({
-    mutationFn: () => projectsApi.createFile(projectId!, currentFile, content),
+    // Always read from the editor to get the latest content (MonacoBinding
+    // keeps the model in sync, so getValue() is always up-to-date)
+    mutationFn: () =>
+      projectsApi.createFile(projectId!, currentFile, editorRef.current?.getValue() ?? content),
     onMutate: () => setSaving(true),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['files', projectId] })
@@ -161,13 +271,21 @@ export default function EditorPage() {
   })
 
   const handleDownload = () => {
-    const blob = new Blob([content], { type: 'text/plain' })
+    const text = editorRef.current?.getValue() ?? content
+    const blob = new Blob([text], { type: 'text/plain' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
     a.download = currentFile.split('/').pop() || 'file.tex'
     a.click()
     URL.revokeObjectURL(url)
+  }
+
+  const handleShare = () => {
+    navigator.clipboard
+      .writeText(window.location.href)
+      .then(() => toast.success('Project link copied!'))
+      .catch(() => toast.error('Could not copy link'))
   }
 
   const compile = useMutation({
@@ -245,58 +363,6 @@ export default function EditorPage() {
     }, 2000)
   }
 
-  const handleEditorChange = (value: string | undefined) => {
-    setContent(value || '')
-  }
-
-  // Yjs collaboration + presence
-  useEffect(() => {
-    if (!projectId) return
-
-    const ydoc = new Y.Doc()
-    const provider = new WebsocketProvider(WS_URL, projectId, ydoc)
-
-    const ytext = ydoc.getText('content')
-    ytextRef.current = ytext
-
-    ytext.observe(() => {
-      if (mountedRef.current) {
-        setContent(ytext.toString())
-      }
-    })
-
-    // Set local awareness
-    if (user) {
-      provider.awareness.setLocalStateField('user', {
-        name: user.email,
-        color: userColor(user.id),
-      })
-    }
-
-    // Track connected users
-    const updateUsers = () => {
-      const states = provider.awareness.getStates()
-      const users: AwarenessUser[] = []
-      states.forEach((state, clientId) => {
-        if (clientId !== provider.awareness.clientID && state.user) {
-          users.push(state.user)
-        }
-      })
-      if (mountedRef.current) setConnectedUsers(users)
-    }
-
-    provider.awareness.on('change', updateUsers)
-    updateUsers()
-
-    return () => {
-      ytextRef.current = null
-      provider.awareness.off('change', updateUsers)
-      provider.destroy()
-      ydoc.destroy()
-      setConnectedUsers([])
-    }
-  }, [projectId, user])
-
   // Draggable splitter
   const handleSplitterMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -337,7 +403,6 @@ export default function EditorPage() {
       await projectsApi.createFile(projectId, trimmed, '')
       queryClient.invalidateQueries({ queryKey: ['files', projectId] })
       setCurrentFile(trimmed)
-      setContent('')
       setShowNewFileModal(false)
       setNewFileName('')
       toast.success(`Created ${trimmed}`)
@@ -373,11 +438,11 @@ export default function EditorPage() {
   }
 
   const handleDownloadFile = async (path: string) => {
-    let text = content
+    let text = editorRef.current?.getValue() ?? content
     if (path !== currentFile) {
       try {
         const res = await projectsApi.getFile(projectId!, path)
-        text = typeof res.data === 'string' ? res.data : ((res.data as any)?.content ?? '')
+        text = typeof res.data === 'string' ? res.data : ((res.data as { content?: string })?.content ?? '')
       } catch {
         toast.error('Failed to download file')
         return
@@ -397,8 +462,6 @@ export default function EditorPage() {
     registerLatexLanguage(monaco)
   }
 
-  const latexDiagnosticsCleanupRef = useRef<(() => void) | null>(null)
-
   const handleEditorMount: OnMount = (editor, monaco) => {
     editorRef.current = editor
     // Clean up any previous diagnostics registration
@@ -416,6 +479,9 @@ export default function EditorPage() {
         setSelectedText('')
       }
     })
+
+    // Signal that the editor is ready — triggers the per-file binding effect
+    setEditorMounted(true)
   }
 
   const handleOutlineNavigate = (line: number) => {
@@ -430,18 +496,19 @@ export default function EditorPage() {
     if (!syncTeXData) return
     const loc = findSourceFromClick(syncTeXData, page, yRatio)
     if (!loc) return
-    // If the source file differs from the current file, switch to it
     const targetFile = files?.find((f) => f.path.endsWith(loc.file))?.path ?? loc.file
     if (targetFile !== currentFile) {
       setCurrentFile(targetFile)
     }
-    // Navigate after a tick (allow file switch + editor re-render)
     setTimeout(() => handleOutlineNavigate(loc.line), 50)
     toast.success(`Jumped to ${loc.file}:${loc.line}`, { duration: 1500 })
   }
 
   // Memoized outline
   const outlineContent = useMemo(() => content, [content])
+
+  const localUserColor = userColor(user?.id || '')
+  const localUserInitial = (user?.email?.[0] ?? 'U').toUpperCase()
 
   return (
     <div style={styles.container}>
@@ -451,24 +518,29 @@ export default function EditorPage() {
             &larr; Back
           </Link>
           <h2>{project?.title || 'Loading...'}</h2>
-          {connectedUsers.length > 0 && (
-            <div style={styles.presenceBar}>
-              {connectedUsers.map((u, i) => (
-                <div
-                  key={i}
-                  style={{
-                    ...styles.presenceDot,
-                    backgroundColor: u.color,
-                  }}
-                  title={u.name}
-                >
-                  {u.name[0].toUpperCase()}
-                </div>
-              ))}
+          {/* Presence bar — always visible; shows local user + any remote users */}
+          <div style={styles.presenceBar}>
+            <div
+              style={{ ...styles.presenceDot, backgroundColor: localUserColor }}
+              title={`${user?.email ?? 'You'} (you)`}
+            >
+              {localUserInitial}
             </div>
-          )}
+            {connectedUsers.map((u, i) => (
+              <div
+                key={i}
+                style={{ ...styles.presenceDot, backgroundColor: u.color }}
+                title={u.name}
+              >
+                {u.name[0].toUpperCase()}
+              </div>
+            ))}
+          </div>
         </div>
         <div style={styles.headerRight}>
+          <button className="secondary" onClick={handleShare} title="Copy project link">
+            Share
+          </button>
           <button
             className="secondary"
             onClick={() => setShowAIPanel((v) => !v)}
@@ -550,12 +622,11 @@ export default function EditorPage() {
         </aside>
 
         <div style={styles.editor}>
+          {/* Monaco Editor in uncontrolled mode — MonacoBinding owns the content */}
           <Editor
             height="100%"
             defaultLanguage="latex"
             theme="vs-light"
-            value={content}
-            onChange={handleEditorChange}
             beforeMount={handleEditorBeforeMount}
             onMount={handleEditorMount}
             options={{
