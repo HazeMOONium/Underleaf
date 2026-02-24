@@ -1,32 +1,49 @@
 import { useState, useEffect } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { useAuthStore } from '../stores/auth'
+import { authApi } from '../services/api'
 import toast from 'react-hot-toast'
 
-export default function LoginPage() {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const { login, loading, fetchUser } = useAuthStore()
-  const navigate = useNavigate()
+export default function ResetPasswordPage() {
   const [searchParams] = useSearchParams()
-  const nextPath = searchParams.get('next') ?? '/'
+  const navigate = useNavigate()
+  const token = searchParams.get('token') ?? ''
+
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
 
   useEffect(() => {
-    fetchUser()
-      .then(() => {
-        if (localStorage.getItem('token')) navigate(nextPath)
-      })
-      .catch((err) => console.error('fetchUser error:', err))
-  }, [])
+    if (!token) {
+      navigate('/forgot-password', { replace: true })
+    }
+  }, [token, navigate])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    setError('')
+
+    if (newPassword !== confirmPassword) {
+      setError('Passwords do not match.')
+      return
+    }
+    if (newPassword.length < 6) {
+      setError('Password must be at least 6 characters.')
+      return
+    }
+
+    setLoading(true)
     try {
-      await login(email, password)
-      toast.success('Logged in successfully')
-      navigate(nextPath)
-    } catch {
-      toast.error('Invalid credentials')
+      await authApi.resetPassword(token, newPassword)
+      toast.success('Password updated! Please sign in.')
+      navigate('/login', { replace: true })
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        'Invalid or expired reset link.'
+      setError(msg)
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -42,43 +59,43 @@ export default function LoginPage() {
             </svg>
           </div>
           <h1 style={styles.logoText}>Underleaf</h1>
-          <p style={styles.tagline}>Collaborative LaTeX editor</p>
+          <p style={styles.tagline}>Set a new password</p>
         </div>
 
         <form onSubmit={handleSubmit} style={styles.form}>
           <div style={styles.field}>
-            <label style={styles.label} htmlFor="login-email">Email</label>
+            <label style={styles.label} htmlFor="new-password">New password</label>
             <input
-              id="login-email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
+              id="new-password"
+              type="password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder="At least 6 characters"
               required
+              minLength={6}
             />
           </div>
           <div style={styles.field}>
-            <label style={styles.label} htmlFor="login-password">Password</label>
+            <label style={styles.label} htmlFor="confirm-password">Confirm password</label>
             <input
-              id="login-password"
+              id="confirm-password"
               type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              placeholder="Repeat your new password"
               required
             />
           </div>
-          <div style={styles.forgotRow}>
-            <Link to="/forgot-password" style={styles.forgotLink}>Forgot password?</Link>
-          </div>
+
+          {error && <p style={styles.errorMsg}>{error}</p>}
+
           <button type="submit" className="primary" disabled={loading} style={styles.submitBtn}>
-            {loading ? 'Signing in…' : 'Sign in'}
+            {loading ? 'Updating…' : 'Set new password'}
           </button>
         </form>
 
         <p style={styles.footer}>
-          Don't have an account?{' '}
-          <Link to="/register">Create one</Link>
+          <Link to="/login">← Back to sign in</Link>
         </p>
       </div>
     </div>
@@ -138,13 +155,13 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     color: 'var(--color-text)',
   },
-  forgotRow: {
-    display: 'flex',
-    justifyContent: 'flex-end',
-    marginTop: '-4px',
-  },
-  forgotLink: {
+  errorMsg: {
     fontSize: '13px',
+    color: '#dc2626',
+    padding: '8px 12px',
+    backgroundColor: '#fef2f2',
+    borderRadius: '6px',
+    border: '1px solid #fecaca',
   },
   submitBtn: {
     marginTop: '4px',

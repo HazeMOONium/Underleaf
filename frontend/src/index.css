@@ -1,22 +1,64 @@
 :root {
-  --color-primary: #2c3e50;
-  --color-secondary: #3498db;
-  --color-accent: #e74c3c;
-  --color-background: #f8f9fa;
+  /* Brand */
+  --color-brand: #1a7f4b;
+  --color-brand-dark: #155f38;
+  --color-brand-light: #22a262;
+  --color-brand-glow: rgba(26, 127, 75, 0.15);
+
+  /* Header & Sidebar (dark) */
+  --color-header-bg: #1a2035;
+  --color-header-border: rgba(255, 255, 255, 0.06);
+  --color-sidebar-bg: #1e2638;
+  --color-sidebar-hover: rgba(255, 255, 255, 0.06);
+  --color-sidebar-active: rgba(255, 255, 255, 0.12);
+  --color-sidebar-text: #b8c5d6;
+  --color-sidebar-text-muted: #6b7a8f;
+  --color-sidebar-border: rgba(255, 255, 255, 0.07);
+
+  /* Surfaces */
+  --color-background: #f1f3f7;
   --color-surface: #ffffff;
-  --color-text: #2c3e50;
-  --color-text-muted: #6c757d;
-  --color-border: #dee2e6;
-  --color-success: #27ae60;
-  --color-warning: #f39c12;
-  --color-error: #e74c3c;
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.1);
-  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
+  --color-surface-alt: #f8fafc;
+
+  /* Text */
+  --color-text: #1a202c;
+  --color-text-muted: #64748b;
+  --color-text-light: #94a3b8;
+
+  /* Borders */
+  --color-border: #e2e8f0;
+  --color-border-focus: #3b82f6;
+
+  /* Semantic */
+  --color-primary: #1a7f4b;
+  --color-secondary: #2563eb;
+  --color-accent: #ef4444;
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-error: #dc2626;
+
+  /* Shadows */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.05);
+  --shadow-lg: 0 10px 25px rgba(0, 0, 0, 0.1), 0 4px 8px rgba(0, 0, 0, 0.06);
+  --shadow-xl: 0 20px 40px rgba(0, 0, 0, 0.12), 0 8px 16px rgba(0, 0, 0, 0.06);
+  --shadow-brand: 0 4px 14px rgba(26, 127, 75, 0.35);
+
+  /* Radii */
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  /* Transitions */
+  --transition-fast: 0.12s ease;
+  --transition-normal: 0.2s ease;
+  --transition-slow: 0.35s ease;
 }
 
+/* ─── Reset ─────────────────────────────────────────────────────────────── */
 * {
   margin: 0;
   padding: 0;
@@ -25,87 +67,343 @@
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
-    Ubuntu, Cantarell, sans-serif;
+    Ubuntu, Cantarell, 'Inter', sans-serif;
   background-color: var(--color-background);
   color: var(--color-text);
   line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
+/* ─── Buttons ────────────────────────────────────────────────────────────── */
 button {
   cursor: pointer;
   border: none;
-  font-size: 14px;
-  padding: 8px 16px;
-  border-radius: var(--radius-sm);
-  transition: all 0.2s ease;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 14px;
+  border-radius: var(--radius-md);
+  transition: all var(--transition-fast);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
 }
 
 button.primary {
-  background-color: var(--color-secondary);
+  background: linear-gradient(135deg, var(--color-brand-light), var(--color-brand));
   color: white;
+  box-shadow: var(--shadow-brand);
 }
 
-button.primary:hover {
-  background-color: #2980b9;
+button.primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #27b56a, var(--color-brand-light));
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(26, 127, 75, 0.4);
+}
+
+button.primary:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+button.primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
 }
 
 button.secondary {
-  background-color: var(--color-surface);
+  background: var(--color-surface);
   color: var(--color-text);
   border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-xs);
 }
 
-button.secondary:hover {
-  background-color: var(--color-background);
+button.secondary:hover:not(:disabled) {
+  background: var(--color-surface-alt);
+  border-color: #c4cdd8;
+  box-shadow: var(--shadow-sm);
 }
 
+/* Dark surface variants for buttons inside dark panels */
+.dark-panel button.secondary {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--color-sidebar-text);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.dark-panel button.secondary:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* ─── Inputs ─────────────────────────────────────────────────────────────── */
 input,
 textarea {
   font-size: 14px;
-  padding: 10px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-md);
   width: 100%;
-  transition: border-color 0.2s ease;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  background: var(--color-surface);
+  color: var(--color-text);
 }
 
 input:focus,
 textarea:focus {
   outline: none;
-  border-color: var(--color-secondary);
+  border-color: var(--color-border-focus);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
 }
 
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-text-light);
+}
+
+/* ─── Links ──────────────────────────────────────────────────────────────── */
 a {
   color: var(--color-secondary);
   text-decoration: none;
+  transition: color var(--transition-fast);
 }
 
 a:hover {
   text-decoration: underline;
 }
 
+/* ─── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.dark-panel::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.dark-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* ─── Utilities ──────────────────────────────────────────────────────────── */
 .container {
   max-width: 1200px;
   margin: 0 auto;
-  padding: 0 20px;
+  padding: 0 24px;
 }
 
 .card {
   background: var(--color-surface);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
   padding: 20px;
+  border: 1px solid var(--color-border);
 }
 
-/* Monaco gutter icon for lines with comments */
+/* ─── Animations ─────────────────────────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeInScale {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(16px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-16px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.5; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+.animate-fade-in        { animation: fadeIn 0.25s ease forwards; }
+.animate-fade-in-scale  { animation: fadeInScale 0.2s ease forwards; }
+.animate-slide-in-right { animation: slideInRight 0.22s ease forwards; }
+.animate-slide-in-left  { animation: slideInLeft 0.22s ease forwards; }
+.animate-pulse          { animation: pulse 1.6s ease-in-out infinite; }
+.animate-spin           { animation: spin 0.8s linear infinite; }
+
+/* ─── Comment gutter icon ────────────────────────────────────────────────── */
 .comment-gutter-icon {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='%231d4ed8' d='M2 2h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H9l-3 2v-2H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='%231a7f4b' d='M2 2h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H9l-3 2v-2H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z'/%3E%3C/svg%3E");
   background-size: 13px 13px;
   background-repeat: no-repeat;
   background-position: center;
   cursor: pointer;
   opacity: 0.7;
+  transition: opacity var(--transition-fast);
 }
+
 .comment-gutter-icon:hover {
   opacity: 1;
 }
+
+/* ─── Dashboard project cards ────────────────────────────────────────────── */
+.project-card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-lg) !important;
+}
+
+.project-card:hover .card-actions {
+  opacity: 1 !important;
+}
+
+/* ─── DnD drag overlay ───────────────────────────────────────────────────── */
+.dnd-drag-overlay {
+  opacity: 0.85;
+  transform: rotate(1.5deg) scale(1.02);
+  box-shadow: var(--shadow-lg);
+  pointer-events: none;
+}
+
+/* ─── Badge ──────────────────────────────────────────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.badge-green { background: rgba(22, 163, 74, 0.12); color: #15803d; }
+.badge-blue  { background: rgba(37, 99, 235, 0.12); color: #1d4ed8; }
+.badge-gray  { background: rgba(100, 116, 139, 0.12); color: #475569; }
+
+/* ─── Editor header buttons ──────────────────────────────────────────────── */
+header [style*="rgba(255,255,255,0.08)"]:hover {
+  background: rgba(255, 255, 255, 0.14) !important;
+}
+
+/* Splitter hover */
+[style*="col-resize"]:hover {
+  background-color: var(--color-brand) !important;
+  opacity: 0.6;
+}
+
+/* Sidebar icon buttons */
+aside button[style*="background: none"]:hover,
+.dark-panel button[style*="background: none"]:hover {
+  background: rgba(255, 255, 255, 0.1) !important;
+  color: rgba(255, 255, 255, 0.85) !important;
+}
+
+/* ─── File tree row hover ─────────────────────────────────────────────────── */
+/* Show action buttons on row hover (can't do :hover in inline styles) */
+li > div:hover > button[title],
+li > div:hover > button[title="Delete"],
+li > div:hover > button[title="New file here"] {
+  opacity: 0.6 !important;
+}
+
+li > div:hover {
+  background-color: var(--color-sidebar-hover);
+}
+
+/* ─── Context menu item hover ─────────────────────────────────────────────── */
+[style*="position: fixed"][style*="zIndex: 9999"] button:hover,
+[style*="position: fixed"][style*="z-index: 9999"] button:hover {
+  background-color: var(--color-surface-alt) !important;
+}
+
+/* ─── Dashboard logout button hover ─────────────────────────────────────── */
+[style*="rgba(255,255,255,0.08)"]:hover {
+  background: rgba(255, 255, 255, 0.15) !important;
+}
+
+/* ─── Sidebar icon buttons hover ─────────────────────────────────────────── */
+aside button:not(.primary):not(.secondary):hover {
+  background: rgba(255, 255, 255, 0.1) !important;
+  color: rgba(255, 255, 255, 0.9) !important;
+}
+
+/* ─── Skeleton loading ───────────────────────────────────────────────────── */
+@keyframes shimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+.skeleton {
+  background: linear-gradient(90deg,
+    rgba(0,0,0,0.05) 25%,
+    rgba(0,0,0,0.08) 50%,
+    rgba(0,0,0,0.05) 75%
+  );
+  background-size: 200% auto;
+  animation: shimmer 1.4s ease infinite;
+  border-radius: var(--radius-md);
+}
+
+/* ─── PDF text layer (enables text selection in PDF viewer) ──────────────── */
+.pdf-text-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  opacity: 1;
+  line-height: 1;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  pointer-events: auto;
+}
+
+.pdf-text-layer span,
+.pdf-text-layer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+  pointer-events: auto;
+}
+
+.pdf-text-layer ::selection {
+  background: rgba(0, 120, 255, 0.3);
+  color: transparent;
+}
+
+/* ─── Output panel tab button hover ──────────────────────────────────────── */
+[style*="borderBottom: 2px solid transparent"]:hover {
+  color: var(--color-text) !important;
+}
+
+/* ─── Files tab item hover ───────────────────────────────────────────────── */
+[style*="border: 1px solid var(--color-border)"]:hover {
+  background-color: var(--color-surface-alt) !important;
+}
+
+/* ─── Monaco remote cursor/selection decorations ─────────────────────────── */
+/* Classes injected dynamically per user — kept here as reference structure */
+/* [data-color]-selection: { background: color+40 }                          */
+/* [data-color]-cursorline: { background: color+15 }                         */

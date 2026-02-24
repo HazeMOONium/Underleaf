@@ -84,7 +84,7 @@ class Permission(Base):
 
     project_id = Column(String, ForeignKey("projects.id"), primary_key=True)
     user_id = Column(String, ForeignKey("users.id"), primary_key=True)
-    role = Column(SQLEnum(ProjectRole), default=ProjectRole.VIEWER, nullable=False)
+    role = Column(SQLEnum(ProjectRole, values_callable=lambda obj: [e.value for e in obj]), default=ProjectRole.VIEWER, nullable=False)
     granted_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     granted_by = Column(String, ForeignKey("users.id"), nullable=True)
 
@@ -100,7 +100,7 @@ class ProjectInvite(Base):
     project_id = Column(String, ForeignKey("projects.id"), nullable=False)
     token = Column(String, unique=True, nullable=False, index=True,
                    default=lambda: secrets.token_urlsafe(32))
-    role = Column(SQLEnum(ProjectRole), nullable=False)
+    role = Column(SQLEnum(ProjectRole, values_callable=lambda obj: [e.value for e in obj]), nullable=False)
     created_by = Column(String, ForeignKey("users.id"), nullable=False)
     expires_at = Column(DateTime, nullable=True)
     use_count = Column(Integer, default=0, nullable=False)

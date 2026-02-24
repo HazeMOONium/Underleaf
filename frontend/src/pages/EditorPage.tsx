@@ -27,8 +27,16 @@ const WS_URL =
   `ws://${window.location.hostname}:${window.location.port}/ws-collab`
 
 interface AwarenessUser {
+  clientId: number
   name: string
   color: string
+  cursor?: { lineNumber: number; column: number }
+  selection?: {
+    startLineNumber: number
+    startColumn: number
+    endLineNumber: number
+    endColumn: number
+  }
 }
 
 export default function EditorPage() {
@@ -48,10 +56,10 @@ export default function EditorPage() {
   const [showNewFolderModal, setShowNewFolderModal] = useState(false)
   const [newFolderParent, setNewFolderParent] = useState('')
   const [newFolderName, setNewFolderName] = useState('')
-  const [compileError, setCompileError] = useState<{
-    message: string
-    logs: string
-  } | null>(null)
+  const [compileError, setCompileError] = useState<string | null>(null)
+  const [compileLogs, setCompileLogs] = useState<string>('')
+  const [lastJobId, setLastJobId] = useState<string | null>(null)
+  const [previewTab, setPreviewTab] = useState<'pdf' | 'logs' | 'files'>('pdf')
   const [connectedUsers, setConnectedUsers] = useState<AwarenessUser[]>([])
   const [showAIPanel, setShowAIPanel] = useState(false)
   const [selectedText, setSelectedText] = useState('')
@@ -62,7 +70,9 @@ export default function EditorPage() {
   const [commentFocusLine, setCommentFocusLine] = useState<number | null>(null)
 
   // Role-based access control
+  // null = still loading | false = loaded, not a member | ProjectRole = active role
   const myRole = useProjectRole(projectId)
+  const accessRevoked = myRole === false
   const editorRole = myRole ? canEdit(myRole) : false
   const commenterRole = myRole ? canComment(myRole) : false
   // ownerRole available for future use (e.g. member management UI guard)
@@ -73,8 +83,11 @@ export default function EditorPage() {
   const mountedRef = useRef(true)
   const isDraggingRef = useRef(false)
   const saveRef = useRef<() => void>(() => {})
+  const compileRef = useRef<() => void>(() => {})
+  const newFileRef = useRef<() => void>(() => {})
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
   const latexDiagnosticsCleanupRef = useRef<(() => void) | null>(null)
+  const remoteDecorationsRef = useRef<Monaco.editor.IEditorDecorationsCollection | null>(null)
 
   // Yjs document and provider — live for the lifetime of the project page
   const ydocRef = useRef<Y.Doc | null>(null)
@@ -94,16 +107,28 @@ export default function EditorPage() {
     }
   }, [])
 
+  // Keep Monaco readOnly in sync with the current role (options prop only applies on mount)
+  useEffect(() => {
+    editorRef.current?.updateOptions({ readOnly: !editorRole })
+  }, [editorRole])
+
+  // Wipe editor content the moment access is revoked so the file is never visible
+  useEffect(() => {
+    if (accessRevoked) {
+      editorRef.current?.getModel()?.setValue('')
+    }
+  }, [accessRevoked])
+
   const { data: project } = useQuery({
     queryKey: ['project', projectId],
     queryFn: () => projectsApi.get(projectId!).then((res) => res.data),
-    enabled: !!projectId,
+    enabled: !!projectId && myRole !== false,
   })
 
   const { data: files } = useQuery({
     queryKey: ['files', projectId],
     queryFn: () => projectsApi.listFiles(projectId!).then((res) => res.data),
-    enabled: !!projectId,
+    enabled: !!projectId && myRole !== false,
   })
 
   // ── Project-level Yjs setup ──────────────────────────────────────────────
@@ -129,7 +154,14 @@ export default function EditorPage() {
       const users: AwarenessUser[] = []
       states.forEach((state, clientId) => {
         if (clientId !== provider.awareness.clientID && state.user) {
-          users.push(state.user as AwarenessUser)
+          const u = state.user as AwarenessUser
+          users.push({
+            clientId,
+            name: u.name,
+            color: u.color,
+            cursor: u.cursor,
+            selection: u.selection,
+          })
         }
       })
       if (mountedRef.current) setConnectedUsers(users)
@@ -138,8 +170,22 @@ export default function EditorPage() {
     provider.awareness.on('change', updateUsers)
     updateUsers()
 
+    // When a new peer joins, re-broadcast our cursor so they see it immediately
+    // without waiting for the local user to move.
+    const onPeerJoin = ({ added }: { added: number[] }) => {
+      if (added.length === 0 || !user || !editorRef.current) return
+      const pos = editorRef.current.getPosition()
+      provider.awareness.setLocalStateField('user', {
+        name: user.email,
+        color: userColor(user.id),
+        cursor: pos ? { lineNumber: pos.lineNumber, column: pos.column } : undefined,
+      })
+    }
+    provider.awareness.on('change', onPeerJoin)
+
     return () => {
       provider.awareness.off('change', updateUsers)
+      provider.awareness.off('change', onPeerJoin)
       // Destroy the per-file binding first before tearing down the provider
       bindingRef.current?.destroy()
       bindingRef.current = null
@@ -154,6 +200,20 @@ export default function EditorPage() {
       setConnectedUsers([])
     }
   }, [projectId, user])
+
+  // Broadcast cursor whenever the editor is ready or the user identity changes.
+  // This covers the case where the Yjs provider is (re)created after
+  // handleEditorMount has already fired, leaving the new provider without a cursor.
+  useEffect(() => {
+    const provider = providerRef.current
+    if (!provider || !user || !editorMounted) return
+    const pos = editorRef.current?.getPosition()
+    provider.awareness.setLocalStateField('user', {
+      name: user.email,
+      color: userColor(user.id),
+      cursor: pos ? { lineNumber: pos.lineNumber, column: pos.column } : undefined,
+    })
+  }, [editorMounted, user])
 
   // ── Per-file MonacoBinding ───────────────────────────────────────────────
   // Recreated whenever the active file changes or the editor first mounts.
@@ -240,6 +300,8 @@ export default function EditorPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['files', projectId] })
       toast.success('Saved')
+      // Auto-compile on save
+      compileRef.current()
     },
     onError: () => toast.error('Save failed'),
     onSettled: () => setSaving(false),
@@ -247,18 +309,121 @@ export default function EditorPage() {
 
   // Keep saveRef in sync for Ctrl+S
   saveRef.current = () => saveFile.mutate()
+  newFileRef.current = () => { if (editorRole) setShowNewFileModal(true) }
 
-  // Ctrl+S keyboard shortcut
+  // Ctrl+S / Ctrl+N keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault()
         saveRef.current()
       }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+        e.preventDefault()
+        if (editorRole) setShowNewFileModal(true)
+      }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [])
+  }, [editorRole])
+
+  // Inject per-user CSS for Monaco selection + line-highlight decorations.
+  // Uses rgba() (not 8-digit hex) and .monaco-editor parent for specificity.
+  useEffect(() => {
+    let styleEl = document.getElementById('underleaf-remote-user-css') as HTMLStyleElement | null
+    if (!styleEl) {
+      styleEl = document.createElement('style')
+      styleEl.id = 'underleaf-remote-user-css'
+      document.head.appendChild(styleEl)
+    }
+    // u.color is hsl(...) — use clientId for valid CSS class names,
+    // and convert hsl → hsla for semi-transparent backgrounds.
+    const toHsla = (hsl: string, a: number) =>
+      hsl.replace('hsl(', 'hsla(').replace(')', `, ${a})`)
+
+    const css = connectedUsers
+      .map((u) => {
+        const cls = `uc${u.clientId}`
+        const selBg  = toHsla(u.color, 0.35)
+        const lineBg = toHsla(u.color, 0.10)
+        return [
+          // Selection overlay
+          `.monaco-editor .view-overlays .${cls}-sel,`,
+          `.monaco-editor .${cls}-sel { background-color: ${selBg} !important; }`,
+          // Line highlight overlay
+          `.monaco-editor .view-overlays .${cls}-line,`,
+          `.monaco-editor .${cls}-line { background-color: ${lineBg} !important; }`,
+          // Cursor bar: a 2px solid-color inline-block span injected into the text layer
+          `.monaco-editor .${cls}-cursor {`,
+          `  display: inline-block !important;`,
+          `  width: 2px !important;`,
+          `  height: 1em !important;`,
+          `  background: ${u.color} !important;`,
+          `  vertical-align: text-bottom !important;`,
+          `  margin-left: -2px !important;`,
+          `  pointer-events: none !important;`,
+          `}`,
+        ].join('\n')
+      })
+      .join('\n')
+    styleEl.textContent = css
+  }, [connectedUsers])
+
+  // Decorations: className for both selection and line highlight.
+  // className creates absolutely-positioned overlay divs (same as Monaco's own
+  // selection highlight) — these are always visible above the text layer.
+  // Cursor bars are handled separately via content widgets.
+  useEffect(() => {
+    const editor = editorRef.current
+    if (!editor || !editorMounted) return
+    const monaco = (window as any).monaco
+    if (!monaco) return
+
+    const decorations: Monaco.editor.IModelDeltaDecoration[] = []
+
+    connectedUsers.forEach((u) => {
+      // Use clientId for CSS class names — u.color is hsl(...) which has
+      // characters invalid in CSS class names (parentheses, commas, %).
+      const cls = `uc${u.clientId}`
+
+      if (u.selection) {
+        const { startLineNumber, startColumn, endLineNumber, endColumn } = u.selection
+        const isEmpty = startLineNumber === endLineNumber && startColumn === endColumn
+        if (!isEmpty) {
+          decorations.push({
+            range: new monaco.Range(startLineNumber, startColumn, endLineNumber, endColumn),
+            options: {
+              className: `${cls}-sel`,
+              hoverMessage: { value: `**${u.name}**` },
+            },
+          })
+        }
+      }
+
+      if (u.cursor) {
+        // Line highlight
+        decorations.push({
+          range: new monaco.Range(u.cursor.lineNumber, 1, u.cursor.lineNumber, 1),
+          options: { isWholeLine: true, className: `${cls}-line` },
+        })
+        // Cursor bar via beforeContentClassName — real <span> in the text layer,
+        // no z-index conflicts with overlay decorations.
+        decorations.push({
+          range: new monaco.Range(u.cursor.lineNumber, u.cursor.column, u.cursor.lineNumber, u.cursor.column),
+          options: {
+            beforeContentClassName: `${cls}-cursor`,
+            stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+          },
+        })
+      }
+    })
+
+    if (remoteDecorationsRef.current) {
+      remoteDecorationsRef.current.set(decorations)
+    } else {
+      remoteDecorationsRef.current = editor.createDecorationsCollection(decorations)
+    }
+  }, [connectedUsers, editorMounted])
 
   const deleteFileMutation = useMutation({
     mutationFn: (path: string) => projectsApi.deleteFile(projectId!, path),
@@ -303,6 +468,7 @@ export default function EditorPage() {
     onMutate: () => {
       setCompiling(true)
       setCompileError(null)
+      setCompileLogs('')
     },
     onSuccess: (res) => {
       toast.success('Compile job started')
@@ -314,7 +480,23 @@ export default function EditorPage() {
     },
   })
 
+  // Keep compileRef in sync so saveFile.onSuccess can trigger compile
+  // without a circular dependency between the two mutations
+  compileRef.current = () => {
+    if (editorRole && !compiling) compile.mutate()
+  }
+
+  const fetchLogs = async (jobId: string): Promise<string> => {
+    try {
+      const res = await compileApi.getLogs(jobId)
+      return typeof res.data === 'string' ? res.data : JSON.stringify(res.data, null, 2)
+    } catch {
+      return 'Could not retrieve compilation logs.'
+    }
+  }
+
   const pollJobStatus = (jobId: string) => {
+    setLastJobId(jobId)
     const interval = setInterval(async () => {
       if (!mountedRef.current) {
         clearInterval(interval)
@@ -327,6 +509,7 @@ export default function EditorPage() {
           setCompiling(false)
           setCompileError(null)
           toast.success('Compilation complete')
+          // Fetch PDF
           try {
             const res = await compileApi.getArtifact(jobId)
             const blob = new Blob([res.data], { type: 'application/pdf' })
@@ -338,6 +521,8 @@ export default function EditorPage() {
           } catch {
             toast.error('Failed to load PDF preview')
           }
+          // Fetch logs (best-effort, available for the Logs tab)
+          fetchLogs(jobId).then(setCompileLogs)
           // Fetch synctex for inverse sync (best-effort)
           try {
             const syncRes = await compileApi.getSyncTeX(jobId)
@@ -349,28 +534,46 @@ export default function EditorPage() {
         } else if (data.status === 'failed') {
           clearInterval(interval)
           setCompiling(false)
-          const errorMsg = data.error_message || 'Compilation failed'
-          let logs = ''
-          try {
-            const logRes = await compileApi.getLogs(jobId)
-            logs =
-              typeof logRes.data === 'string'
-                ? logRes.data
-                : JSON.stringify(logRes.data, null, 2)
-          } catch {
-            logs = 'Could not retrieve compilation logs.'
-          }
-          setCompileError({ message: errorMsg, logs })
+          setCompileError(data.error_message || 'Compilation failed')
           setPdfUrl((prev) => {
             if (prev) URL.revokeObjectURL(prev)
             return null
           })
+          const logs = await fetchLogs(jobId)
+          setCompileLogs(logs)
+          // Auto-switch to logs tab so the user sees what went wrong
+          setPreviewTab('logs')
         }
       } catch {
         clearInterval(interval)
         setCompiling(false)
       }
     }, 2000)
+  }
+
+  const downloadText = (text: string, filename: string) => {
+    const blob = new Blob([text], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const downloadSyncTeX = async (jobId: string) => {
+    try {
+      const res = await compileApi.getSyncTeX(jobId)
+      const blob = new Blob([res.data as BlobPart], { type: 'application/gzip' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'output.synctex.gz'
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      toast.error('Failed to download SyncTeX file')
+    }
   }
 
   // Draggable splitter
@@ -520,15 +723,46 @@ export default function EditorPage() {
     }
     latexDiagnosticsCleanupRef.current = registerLatexDiagnostics(monaco, editor)
 
-    // Track selection for AI rewrite mode
-    editor.onDidChangeCursorSelection(() => {
+    // Track cursor/selection for AI panel and awareness broadcasting
+    const broadcastPosition = () => {
+      const provider = providerRef.current
+      if (!provider || !user) return
+      const pos = editor.getPosition()
       const sel = editor.getSelection()
+      provider.awareness.setLocalStateField('user', {
+        name: user.email,
+        color: userColor(user.id),
+        cursor: pos ? { lineNumber: pos.lineNumber, column: pos.column } : undefined,
+        selection:
+          sel && !sel.isEmpty()
+            ? {
+                startLineNumber: sel.startLineNumber,
+                startColumn: sel.startColumn,
+                endLineNumber: sel.endLineNumber,
+                endColumn: sel.endColumn,
+              }
+            : undefined,
+      })
+    }
+
+    editor.onDidChangeCursorPosition(broadcastPosition)
+
+    editor.onDidChangeCursorSelection((e) => {
+      broadcastPosition()
+      const sel = e.selection
       if (sel && !sel.isEmpty()) {
         setSelectedText(editor.getModel()?.getValueInRange(sel) ?? '')
       } else {
         setSelectedText('')
       }
     })
+
+    // Broadcast initial position so remote users see this cursor immediately
+    // (without waiting for the user to move the cursor first).
+    // Try now (provider may already be ready) and again after a short delay
+    // in case the Yjs provider initializes asynchronously.
+    broadcastPosition()
+    setTimeout(broadcastPosition, 300)
 
     // Gutter click → open comments panel at that line
     editor.onMouseDown((e) => {
@@ -540,6 +774,12 @@ export default function EditorPage() {
         setCommentFocusLine(line)
         setShowCommentsPanel(true)
       }
+    })
+
+    // Register Ctrl+N inside Monaco so it isn't swallowed by the editor's
+    // own keybinding system before it can bubble to the window listener.
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyN, () => {
+      newFileRef.current()
     })
 
     // Signal that the editor is ready — triggers the per-file binding effect
@@ -574,13 +814,35 @@ export default function EditorPage() {
 
   return (
     <div style={styles.container}>
+      {/* ── Access revoked overlay ──────────────────────────────────────── */}
+      {accessRevoked && (
+        <div style={styles.accessRevokedOverlay}>
+          <div style={styles.accessRevokedCard}>
+            <div style={{ fontSize: 48, marginBottom: 16 }}>🔒</div>
+            <h2 style={{ margin: '0 0 8px', color: 'var(--color-text)', fontSize: 20 }}>
+              Access Removed
+            </h2>
+            <p style={{ color: 'var(--color-text-muted)', marginBottom: 24, fontSize: 14, lineHeight: 1.6 }}>
+              You no longer have access to this project. Contact the project owner if you think
+              this is a mistake.
+            </p>
+            <Link to="/" style={styles.accessRevokedBtn}>
+              Go to Dashboard
+            </Link>
+          </div>
+        </div>
+      )}
+      {/* ── Header ─────────────────────────────────────────────────────── */}
       <header style={styles.header}>
         <div style={styles.headerLeft}>
-          <Link to="/" style={styles.backLink}>
-            &larr; Back
+          {/* Logo links back to dashboard */}
+          <Link to="/" style={styles.logoLink} title="Back to Dashboard">
+            <img src="/logo.svg" alt="Underleaf" style={{ height: '22px', width: 'auto' }} />
+            <span style={styles.logoText}>Underleaf</span>
           </Link>
-          <h2>{project?.title || 'Loading...'}</h2>
-          {/* Presence bar — always visible; shows local user + any remote users */}
+          <div style={styles.headerDivider} />
+          <h2 style={styles.projectTitle}>{project?.title || 'Loading...'}</h2>
+          {/* Presence dots */}
           <div style={styles.presenceBar}>
             <div
               style={{ ...styles.presenceDot, backgroundColor: localUserColor }}
@@ -588,9 +850,9 @@ export default function EditorPage() {
             >
               {localUserInitial}
             </div>
-            {connectedUsers.map((u, i) => (
+            {connectedUsers.map((u) => (
               <div
-                key={i}
+                key={u.clientId}
                 style={{ ...styles.presenceDot, backgroundColor: u.color }}
                 title={u.name}
               >
@@ -600,37 +862,41 @@ export default function EditorPage() {
           </div>
         </div>
         <div style={styles.headerRight}>
-          <button className="secondary" onClick={handleShare} title="Manage collaborators">
-            Share
+          <button style={styles.headerBtn} onClick={handleShare} title="Manage collaborators">
+            👥 Share
           </button>
           {commenterRole && (
             <button
-              className="secondary"
+              style={{
+                ...styles.headerBtn,
+                ...(showCommentsPanel ? styles.headerBtnActive : {}),
+              }}
               onClick={() => setShowCommentsPanel((v) => !v)}
               title="Comments"
-              style={showCommentsPanel ? { outline: '2px solid var(--color-primary)' } : {}}
             >
               💬 Comments
             </button>
           )}
           <button
-            className="secondary"
+            style={{
+              ...styles.headerBtn,
+              ...(showAIPanel ? styles.headerBtnActive : {}),
+            }}
             onClick={() => setShowAIPanel((v) => !v)}
             title="AI Assistant"
-            style={showAIPanel ? { outline: '2px solid var(--color-primary)' } : {}}
           >
             ✨ AI
           </button>
-          <button className="secondary" onClick={handleDownload}>
-            Download
+          <button style={styles.headerBtn} onClick={handleDownload}>
+            ↓ Download
           </button>
           {editorRole && (
             <button
-              className="secondary"
+              style={styles.headerBtn}
               onClick={() => saveFile.mutate()}
               disabled={saving}
             >
-              {saving ? 'Saving...' : 'Save'}
+              {saving ? '⏳ Saving…' : '💾 Save'}
             </button>
           )}
           {editorRole && (
@@ -638,30 +904,32 @@ export default function EditorPage() {
               className="primary"
               onClick={() => compile.mutate()}
               disabled={compiling}
+              style={{ fontSize: '13px' }}
             >
-              {compiling ? 'Compiling...' : 'Compile'}
+              {compiling
+                ? <span className="animate-pulse">⚙ Compiling…</span>
+                : '▶ Compile'}
             </button>
           )}
         </div>
       </header>
 
       <div style={styles.main}>
-        <aside style={styles.sidebar}>
+        {/* ── Sidebar ──────────────────────────────────────────────────── */}
+        <aside style={styles.sidebar} className="dark-panel">
           <div style={styles.sidebarHeader}>
-            <h3>Files</h3>
+            <span style={styles.sidebarLabel}>FILES</span>
             {editorRole && (
-              <div style={{ display: 'flex', gap: '4px' }}>
+              <div style={{ display: 'flex', gap: '2px' }}>
                 <button
-                  className="secondary"
-                  style={styles.iconBtn}
+                  style={styles.sidebarIconBtn}
                   onClick={() => handleCreateFolder('')}
                   title="New folder"
                 >
-                  &#128193;
+                  📁
                 </button>
                 <button
-                  className="secondary"
-                  style={styles.iconBtn}
+                  style={styles.sidebarIconBtn}
                   onClick={() => setShowNewFileModal(true)}
                   title="New file"
                 >
@@ -690,7 +958,7 @@ export default function EditorPage() {
             />
             {showAIPanel && (
               <AIPanel
-                errorLogs={compileError?.logs ?? null}
+                errorLogs={compileError ? compileLogs || null : null}
                 fileContent={content}
                 selectedText={selectedText}
               />
@@ -698,8 +966,8 @@ export default function EditorPage() {
           </div>
         </aside>
 
+        {/* ── Editor ───────────────────────────────────────────────────── */}
         <div style={styles.editor}>
-          {/* Monaco Editor in uncontrolled mode — MonacoBinding owns the content */}
           <Editor
             height="100%"
             defaultLanguage="latex"
@@ -707,6 +975,7 @@ export default function EditorPage() {
             beforeMount={handleEditorBeforeMount}
             onMount={handleEditorMount}
             options={{
+              readOnly: !editorRole,
               minimap: { enabled: false },
               fontSize: 14,
               wordWrap: 'on',
@@ -716,11 +985,12 @@ export default function EditorPage() {
               quickSuggestions: true,
               suggestOnTriggerCharacters: true,
               tabCompletion: 'on',
+              renderLineHighlight: 'gutter',
             }}
           />
         </div>
 
-        {/* Comments panel — inline between editor and splitter */}
+        {/* Comments panel */}
         {showCommentsPanel && projectId && myRole && (
           <CommentsPanel
             projectId={projectId}
@@ -730,30 +1000,160 @@ export default function EditorPage() {
           />
         )}
 
-        {/* Draggable splitter handle */}
+        {/* Splitter */}
         <div style={styles.splitter} onMouseDown={handleSplitterMouseDown} />
 
+        {/* ── Output Panel (PDF / Logs / Files) ────────────────────────── */}
         <aside style={{ ...styles.preview, width: `${previewWidth}px` }}>
+          {/* Tab bar */}
           <div style={styles.previewHeader}>
-            <h3>PDF Preview</h3>
+            <div style={styles.tabBar}>
+              {(['pdf', 'logs', 'files'] as const).map((tab) => (
+                <button
+                  key={tab}
+                  style={{
+                    ...styles.tab,
+                    ...(previewTab === tab ? styles.tabActive : {}),
+                  }}
+                  onClick={() => setPreviewTab(tab)}
+                >
+                  {tab === 'pdf' ? 'PDF' : tab === 'logs' ? 'Logs' : 'Files'}
+                  {tab === 'logs' && compileError && (
+                    <span style={styles.tabErrorDot} />
+                  )}
+                </button>
+              ))}
+            </div>
+            {editorRole && (
+              <button
+                className="primary"
+                style={{ fontSize: '11px', padding: '4px 10px', flexShrink: 0 }}
+                onClick={() => compile.mutate()}
+                disabled={compiling}
+              >
+                {compiling ? <span className="animate-pulse">⚙…</span> : '▶'}
+              </button>
+            )}
           </div>
+
+          {/* Tab content */}
           <div style={styles.previewContent}>
-            {compiling ? (
-              <p style={styles.previewPlaceholder}>Compiling...</p>
-            ) : compileError ? (
-              <div style={styles.errorContainer}>
-                <div style={styles.errorMessage}>{compileError.message}</div>
-                <pre style={styles.errorLogs}>{compileError.logs}</pre>
-              </div>
-            ) : pdfUrl ? (
-              <PDFViewer
-                url={pdfUrl}
-                onDoubleClick={syncTeXData ? handlePDFDoubleClick : undefined}
-              />
-            ) : (
-              <p style={styles.previewPlaceholder}>
-                Compile to see PDF preview
-              </p>
+            {/* ── PDF tab ── */}
+            {previewTab === 'pdf' && (
+              compiling ? (
+                <div style={styles.previewEmpty}>
+                  <div className="animate-spin" style={{ fontSize: '24px', marginBottom: '12px' }}>⚙</div>
+                  <p style={styles.previewEmptyText}>Compiling…</p>
+                </div>
+              ) : pdfUrl ? (
+                <PDFViewer
+                  url={pdfUrl}
+                  onDoubleClick={syncTeXData ? handlePDFDoubleClick : undefined}
+                />
+              ) : (
+                <div style={styles.previewEmpty}>
+                  <div style={styles.previewEmptyIcon}>
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                      <polyline points="14 2 14 8 20 8"/>
+                      <line x1="12" y1="18" x2="12" y2="12"/>
+                      <line x1="9" y1="15" x2="15" y2="15"/>
+                    </svg>
+                  </div>
+                  <p style={styles.previewEmptyText}>
+                    {compileError
+                      ? <><span style={{ color: 'var(--color-error)' }}>Compilation failed.</span> Check the Logs tab.</>
+                      : <>Click <strong>▶ Compile</strong> to render your PDF</>}
+                  </p>
+                </div>
+              )
+            )}
+
+            {/* ── Logs tab ── */}
+            {previewTab === 'logs' && (
+              compileLogs ? (
+                <div style={styles.logsContainer}>
+                  {compileError && (
+                    <div style={styles.logsError}>
+                      ✕ {compileError}
+                    </div>
+                  )}
+                  {!compileError && (
+                    <div style={styles.logsSuccess}>
+                      ✓ Compilation succeeded
+                    </div>
+                  )}
+                  <pre style={styles.logsContent}>{compileLogs}</pre>
+                </div>
+              ) : (
+                <div style={styles.previewEmpty}>
+                  {compiling ? (
+                    <>
+                      <div className="animate-spin" style={{ fontSize: '20px', marginBottom: '12px' }}>⚙</div>
+                      <p style={styles.previewEmptyText}>Compiling — logs will appear here…</p>
+                    </>
+                  ) : (
+                    <p style={styles.previewEmptyText}>No logs yet. Compile your project first.</p>
+                  )}
+                </div>
+              )
+            )}
+
+            {/* ── Files tab ── */}
+            {previewTab === 'files' && (
+              lastJobId ? (
+                <div style={styles.filesList}>
+                  {pdfUrl && (
+                    <a
+                      href={pdfUrl}
+                      download={`${project?.title ?? 'output'}.pdf`}
+                      style={styles.fileItem}
+                    >
+                      <span style={styles.fileItemIcon}>📄</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={styles.fileItemName}>{project?.title ?? 'output'}.pdf</div>
+                        <div style={styles.fileItemMeta}>PDF document</div>
+                      </div>
+                      <span style={styles.fileItemDownload}>↓</span>
+                    </a>
+                  )}
+                  {compileLogs && (
+                    <button
+                      style={styles.fileItem}
+                      onClick={() => downloadText(compileLogs, 'output.log')}
+                    >
+                      <span style={styles.fileItemIcon}>📋</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={styles.fileItemName}>output.log</div>
+                        <div style={styles.fileItemMeta}>Compilation log</div>
+                      </div>
+                      <span style={styles.fileItemDownload}>↓</span>
+                    </button>
+                  )}
+                  {syncTeXData && (
+                    <button
+                      style={styles.fileItem}
+                      onClick={() => downloadSyncTeX(lastJobId)}
+                    >
+                      <span style={styles.fileItemIcon}>🔗</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={styles.fileItemName}>output.synctex.gz</div>
+                        <div style={styles.fileItemMeta}>SyncTeX source-link data</div>
+                      </div>
+                      <span style={styles.fileItemDownload}>↓</span>
+                    </button>
+                  )}
+                  {!pdfUrl && !compileLogs && (
+                    <div style={styles.previewEmpty}>
+                      <p style={styles.previewEmptyText}>No output files available.</p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div style={styles.previewEmpty}>
+                  <p style={styles.previewEmptyText}>No output files yet. Compile your project first.</p>
+                </div>
+              )
             )}
           </div>
         </aside>
@@ -861,27 +1261,60 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: '12px 20px',
-    backgroundColor: 'var(--color-surface)',
-    borderBottom: '1px solid var(--color-border)',
+    padding: '0 16px',
+    height: '50px',
+    backgroundColor: 'var(--color-header-bg)',
+    borderBottom: '1px solid var(--color-header-border)',
+    flexShrink: 0,
+    zIndex: 10,
   },
   headerLeft: {
     display: 'flex',
     alignItems: 'center',
-    gap: '16px',
+    gap: '10px',
+    overflow: 'hidden',
   },
   headerRight: {
     display: 'flex',
     alignItems: 'center',
-    gap: '12px',
+    gap: '6px',
+    flexShrink: 0,
   },
-  backLink: {
+  logoLink: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    textDecoration: 'none',
+    flexShrink: 0,
+    opacity: 0.9,
+    transition: 'opacity var(--transition-fast)',
+  },
+  logoText: {
+    fontSize: '13px',
+    fontWeight: 700,
+    color: 'rgba(255,255,255,0.85)',
+    letterSpacing: '0.02em',
+  },
+  headerDivider: {
+    width: '1px',
+    height: '18px',
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    flexShrink: 0,
+  },
+  projectTitle: {
     fontSize: '14px',
+    fontWeight: 600,
+    color: 'rgba(255,255,255,0.9)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
+    maxWidth: '260px',
   },
   presenceBar: {
     display: 'flex',
     gap: '4px',
-    marginLeft: '8px',
+    marginLeft: '4px',
+    flexShrink: 0,
   },
   presenceDot: {
     width: '24px',
@@ -890,9 +1323,27 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    fontSize: '11px',
+    fontSize: '10px',
     fontWeight: 700,
     color: 'white',
+    flexShrink: 0,
+    border: '2px solid rgba(255,255,255,0.2)',
+  },
+  headerBtn: {
+    background: 'rgba(255,255,255,0.08)',
+    border: '1px solid rgba(255,255,255,0.1)',
+    color: 'rgba(255,255,255,0.8)',
+    padding: '5px 10px',
+    borderRadius: 'var(--radius-md)',
+    fontSize: '12px',
+    cursor: 'pointer',
+    transition: 'background var(--transition-fast)',
+    whiteSpace: 'nowrap' as const,
+  },
+  headerBtnActive: {
+    background: 'rgba(26, 127, 75, 0.35)',
+    borderColor: 'rgba(26, 127, 75, 0.6)',
+    color: '#4ade80',
   },
   main: {
     flex: 1,
@@ -901,47 +1352,99 @@ const styles: Record<string, React.CSSProperties> = {
   },
   sidebar: {
     width: '220px',
-    backgroundColor: 'var(--color-surface)',
-    borderRight: '1px solid var(--color-border)',
+    backgroundColor: 'var(--color-sidebar-bg)',
+    borderRight: '1px solid var(--color-sidebar-border)',
     display: 'flex',
     flexDirection: 'column',
+    flexShrink: 0,
   },
   sidebarHeader: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: '12px 16px',
-    borderBottom: '1px solid var(--color-border)',
+    padding: '10px 14px',
+    borderBottom: '1px solid var(--color-sidebar-border)',
     flexShrink: 0,
+  },
+  sidebarLabel: {
+    fontSize: '10px',
+    fontWeight: 700,
+    letterSpacing: '0.08em',
+    color: 'var(--color-sidebar-text-muted)',
+    textTransform: 'uppercase' as const,
+  },
+  sidebarIconBtn: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    padding: '3px 5px',
+    fontSize: '13px',
+    borderRadius: '4px',
+    color: 'var(--color-sidebar-text-muted)',
+    transition: 'background var(--transition-fast), color var(--transition-fast)',
   },
   sidebarContent: {
     flex: 1,
     overflow: 'auto',
-  },
-  iconBtn: {
-    padding: '4px 8px',
-    fontSize: '12px',
   },
   editor: {
     flex: 1,
     overflow: 'hidden',
   },
   splitter: {
-    width: '6px',
+    width: '4px',
     cursor: 'col-resize',
     backgroundColor: 'var(--color-border)',
     flexShrink: 0,
-    transition: 'background-color 0.15s',
+    transition: 'background var(--transition-fast)',
   },
   preview: {
-    backgroundColor: 'var(--color-surface)',
+    backgroundColor: 'var(--color-surface-alt)',
     borderLeft: '1px solid var(--color-border)',
     display: 'flex',
     flexDirection: 'column',
+    flexShrink: 0,
   },
   previewHeader: {
-    padding: '12px 16px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '0 10px 0 0',
     borderBottom: '1px solid var(--color-border)',
+    flexShrink: 0,
+  },
+  tabBar: {
+    display: 'flex',
+    flex: 1,
+    overflow: 'hidden',
+  },
+  tab: {
+    padding: '10px 14px',
+    fontSize: '12px',
+    fontWeight: 500,
+    color: 'var(--color-text-muted)',
+    background: 'none',
+    border: 'none',
+    borderBottom: '2px solid transparent',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '5px',
+    whiteSpace: 'nowrap' as const,
+    transition: 'color 0.15s, border-color 0.15s',
+  },
+  tabActive: {
+    color: 'var(--color-brand)',
+    borderBottom: '2px solid var(--color-brand)',
+    fontWeight: 600,
+  },
+  tabErrorDot: {
+    width: '6px',
+    height: '6px',
+    borderRadius: '50%',
+    backgroundColor: 'var(--color-error)',
+    display: 'inline-block',
+    flexShrink: 0,
   },
   previewContent: {
     flex: 1,
@@ -949,49 +1452,119 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     overflow: 'hidden',
   },
-  previewPlaceholder: {
-    color: 'var(--color-text-muted)',
-    textAlign: 'center',
-    padding: '20px',
-    alignSelf: 'center',
-    marginTop: 'auto',
-    marginBottom: 'auto',
+  previewEmpty: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column' as const,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '10px',
+    padding: '24px',
+    color: 'var(--color-text-light)',
   },
-  errorContainer: {
+  previewEmptyIcon: {
+    color: 'var(--color-border)',
+    marginBottom: '4px',
+  },
+  previewEmptyText: {
+    fontSize: '13px',
+    color: 'var(--color-text-muted)',
+    textAlign: 'center' as const,
+    lineHeight: 1.6,
+  },
+  logsContainer: {
     display: 'flex',
     flexDirection: 'column' as const,
     height: '100%',
     overflow: 'hidden',
   },
-  errorMessage: {
-    padding: '12px 16px',
+  logsError: {
+    padding: '8px 14px',
     backgroundColor: '#fef2f2',
     color: '#dc2626',
     fontWeight: 600,
-    fontSize: '14px',
+    fontSize: '12px',
     borderBottom: '1px solid #fecaca',
     flexShrink: 0,
   },
-  errorLogs: {
+  logsSuccess: {
+    padding: '8px 14px',
+    backgroundColor: '#f0fdf4',
+    color: '#16a34a',
+    fontWeight: 600,
+    fontSize: '12px',
+    borderBottom: '1px solid #bbf7d0',
+    flexShrink: 0,
+  },
+  logsContent: {
     flex: 1,
     margin: 0,
     padding: '12px 16px',
-    fontSize: '12px',
+    fontSize: '11.5px',
     lineHeight: '1.5',
     overflow: 'auto',
-    backgroundColor: '#1e1e1e',
-    color: '#d4d4d4',
-    fontFamily: 'monospace',
+    backgroundColor: '#0f1117',
+    color: '#c9d1d9',
+    fontFamily: '"Fira Code", "Cascadia Code", monospace',
     whiteSpace: 'pre-wrap' as const,
     wordBreak: 'break-word' as const,
   },
+  filesList: {
+    flex: 1,
+    overflow: 'auto',
+    padding: '10px',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '6px',
+  },
+  fileItem: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '10px 12px',
+    borderRadius: 'var(--radius-md)',
+    border: '1px solid var(--color-border)',
+    backgroundColor: 'var(--color-surface)',
+    cursor: 'pointer',
+    textDecoration: 'none',
+    color: 'var(--color-text)',
+    fontSize: '13px',
+    transition: 'background 0.15s',
+    textAlign: 'left' as const,
+    width: '100%',
+    boxSizing: 'border-box' as const,
+  },
+  fileItemIcon: {
+    fontSize: '20px',
+    flexShrink: 0,
+  },
+  fileItemName: {
+    fontWeight: 600,
+    fontSize: '13px',
+    color: 'var(--color-text)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
+  },
+  fileItemMeta: {
+    fontSize: '11px',
+    color: 'var(--color-text-muted)',
+    marginTop: '1px',
+  },
+  fileItemDownload: {
+    fontSize: '16px',
+    color: 'var(--color-brand)',
+    flexShrink: 0,
+    fontWeight: 700,
+  },
   modalOverlay: {
-    position: 'fixed',
+    position: 'fixed' as const,
     top: 0,
     left: 0,
     right: 0,
     bottom: 0,
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backdropFilter: 'blur(4px)',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -999,18 +1572,18 @@ const styles: Record<string, React.CSSProperties> = {
   },
   modal: {
     backgroundColor: 'var(--color-surface)',
-    borderRadius: '8px',
+    borderRadius: 'var(--radius-xl)',
     padding: '24px',
     width: '400px',
     maxWidth: '90vw',
-    boxShadow: '0 4px 24px rgba(0, 0, 0, 0.15)',
+    boxShadow: 'var(--shadow-xl)',
   },
   modalInput: {
     width: '100%',
-    padding: '8px 12px',
+    padding: '9px 12px',
     fontSize: '14px',
-    border: '1px solid var(--color-border)',
-    borderRadius: '4px',
+    border: '1.5px solid var(--color-border)',
+    borderRadius: 'var(--radius-md)',
     boxSizing: 'border-box' as const,
     marginBottom: '16px',
   },
@@ -1018,5 +1591,34 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     justifyContent: 'flex-end',
     gap: '8px',
+  },
+  accessRevokedOverlay: {
+    position: 'fixed' as const,
+    inset: 0,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    backdropFilter: 'blur(6px)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 9999,
+  },
+  accessRevokedCard: {
+    backgroundColor: 'var(--color-surface)',
+    borderRadius: 'var(--radius-xl)',
+    padding: '40px 48px',
+    textAlign: 'center' as const,
+    maxWidth: 420,
+    boxShadow: 'var(--shadow-xl)',
+    border: '1px solid var(--color-border)',
+  },
+  accessRevokedBtn: {
+    display: 'inline-block',
+    padding: '10px 28px',
+    backgroundColor: 'var(--color-brand)',
+    color: '#fff',
+    borderRadius: 'var(--radius-md)',
+    textDecoration: 'none',
+    fontWeight: 600,
+    fontSize: 14,
   },
 }

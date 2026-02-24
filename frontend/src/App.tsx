@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { useAuthStore } from './stores/auth'
 import LoginPage from './pages/LoginPage'
@@ -5,6 +6,8 @@ import RegisterPage from './pages/RegisterPage'
 import DashboardPage from './pages/DashboardPage'
 import EditorPage from './pages/EditorPage'
 import InviteAcceptPage from './pages/InviteAcceptPage'
+import ForgotPasswordPage from './pages/ForgotPasswordPage'
+import ResetPasswordPage from './pages/ResetPasswordPage'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { token } = useAuthStore()
@@ -12,6 +15,13 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
 }
 
 function App() {
+  const { fetchUser } = useAuthStore()
+
+  // Hydrate user from token on every app load / page refresh
+  useEffect(() => {
+    fetchUser().catch(() => {})
+  }, [])
+
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
@@ -34,6 +44,8 @@ function App() {
       />
       {/* Public route — invite preview works without login */}
       <Route path="/invite/:token" element={<InviteAcceptPage />} />
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
       <Route path="*" element={<Navigate to="/login" />} />
     </Routes>
   )

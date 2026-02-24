@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     # AI
     ANTHROPIC_API_KEY: str = ""
 
+    # Email / SMTP
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = "noreply@underleaf.local"
+    SMTP_TLS: bool = True
+    FRONTEND_URL: str = "http://localhost:3000"
+    PASSWORD_RESET_EXPIRE_MINUTES: int = 60
+
     # RabbitMQ
     RABBITMQ_HOST: str = "localhost"
     RABBITMQ_PORT: int = 5672

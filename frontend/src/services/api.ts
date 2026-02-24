@@ -27,6 +27,12 @@ export const authApi = {
   },
 
   me: () => api.get<User>('/auth/me'),
+
+  forgotPassword: (email: string) =>
+    api.post('/auth/forgot-password', { email }),
+
+  resetPassword: (token: string, newPassword: string) =>
+    api.post('/auth/reset-password', { token, new_password: newPassword }),
 }
 
 export const projectsApi = {
