@@ -5,6 +5,87 @@ import { projectsApi } from '../services/api'
 import { useAuthStore } from '../stores/auth'
 import toast from 'react-hot-toast'
 
+// ── Email verification banner ──────────────────────────────────────────────
+// Shown at the top of the page whenever the authenticated user has not yet
+// confirmed their email address. Dismissible for the current session only.
+
+function EmailVerificationBanner({ email }: { email: string }) {
+  const [dismissed, setDismissed] = useState(false)
+  if (dismissed) return null
+
+  return (
+    <div style={bannerStyles.banner}>
+      <span style={bannerStyles.icon}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{ verticalAlign: 'middle' }}>
+          <rect x="2" y="4" width="20" height="16" rx="2" stroke="currentColor" strokeWidth="1.5" />
+          <path d="M2 8l10 7 10-7" stroke="currentColor" strokeWidth="1.5" />
+        </svg>
+      </span>
+      <span style={bannerStyles.text}>
+        Please verify your email address. We sent a link to{' '}
+        <strong>{email}</strong>. Check your inbox (and spam folder).
+      </span>
+      <button
+        style={bannerStyles.dismiss}
+        onClick={() => setDismissed(true)}
+        aria-label="Dismiss"
+        title="Dismiss"
+      >
+        ×
+      </button>
+    </div>
+  )
+}
+
+const bannerStyles: Record<string, React.CSSProperties> = {
+  banner: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    backgroundColor: '#fefce8',
+    borderBottom: '1px solid #fde68a',
+    color: '#92400e',
+    padding: '10px 28px',
+    fontSize: '13px',
+    lineHeight: 1.5,
+  },
+  icon: {
+    flexShrink: 0,
+    color: '#d97706',
+  },
+  text: {
+    flex: 1,
+  },
+  dismiss: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    fontSize: '20px',
+    color: '#92400e',
+    lineHeight: 1,
+    padding: '0 4px',
+    flexShrink: 0,
+    opacity: 0.65,
+  },
+}
+
+// ── ZIP export helper ──────────────────────────────────────────────────────
+
+async function downloadProjectZip(projectId: string, title: string) {
+  try {
+    const res = await projectsApi.exportZip(projectId)
+    const blob = new Blob([res.data], { type: 'application/zip' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${title}.zip`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch {
+    toast.error('Failed to export ZIP')
+  }
+}
+
 export default function DashboardPage() {
   const [newProjectTitle, setNewProjectTitle] = useState('')
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -105,12 +186,20 @@ export default function DashboardPage() {
         </div>
         <div style={styles.headerRight}>
           <span style={styles.userEmail}>{user?.email}</span>
+          <Link to="/profile" style={styles.profileLink} title="Profile & Settings">
+            Profile
+          </Link>
           <div style={styles.userAvatar} title={user?.email}>{userInitial}</div>
           <button style={styles.logoutBtn} onClick={logout}>
             Sign out
           </button>
         </div>
       </header>
+
+      {/* Email verification banner — shown until dismissed or user verifies */}
+      {user && !user.email_verified && (
+        <EmailVerificationBanner email={user.email} />
+      )}
 
       {/* Main */}
       <main style={styles.main}>
@@ -279,6 +368,13 @@ function ProjectCard({
             <h3 style={cardStyles.title}>{project.title}</h3>
           )}
           <div style={cardStyles.actions} className="card-actions">
+            <button
+              style={cardStyles.actionBtn}
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); downloadProjectZip(project.id, project.title) }}
+              title="Download as ZIP"
+            >
+              ↓
+            </button>
             <button
               style={cardStyles.actionBtn}
               onClick={(e) => onStartRename(e, project.id, project.title)}
@@ -462,6 +558,16 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'white',
     cursor: 'default',
     flexShrink: 0,
+  },
+  profileLink: {
+    background: 'rgba(255,255,255,0.08)',
+    border: '1px solid rgba(255,255,255,0.12)',
+    color: 'rgba(255,255,255,0.8)',
+    padding: '6px 12px',
+    borderRadius: 'var(--radius-md)',
+    fontSize: '13px',
+    textDecoration: 'none',
+    transition: 'background var(--transition-fast)',
   },
   logoutBtn: {
     background: 'rgba(255,255,255,0.08)',

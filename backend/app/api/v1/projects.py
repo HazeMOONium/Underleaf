@@ -1,8 +1,12 @@
+import base64
+import io
 import logging
+import zipfile
 from typing import List, Optional, Tuple
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -13,6 +17,7 @@ from app.schemas.project import (
     ProjectUpdate,
     ProjectResponse,
     ProjectFileBase,
+    ProjectFileBinaryUpload,
     ProjectFileResponse,
     ProjectFileRename,
 )
@@ -147,6 +152,45 @@ def delete_project(
     return None
 
 
+@router.get("/{project_id}/export/zip")
+def export_project_zip(
+    project_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download all project files as a ZIP archive."""
+    project, _ = get_project_with_access(
+        project_id, current_user.id, db, minimum_role=ProjectRole.VIEWER
+    )
+
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    bucket = minio_service._default_bucket
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for file in files:
+            if not file.blob_ref:
+                file_bytes = b""
+            else:
+                try:
+                    file_bytes = minio_service.download_file(bucket, file.blob_ref)
+                except Exception as e:
+                    logger.warning(f"Skipping file {file.path} during ZIP export: {e}")
+                    file_bytes = b""
+            zf.writestr(file.path, file_bytes)
+
+    zip_buffer.seek(0)
+
+    safe_title = quote(project.title, safe="")
+    filename_header = f"attachment; filename*=UTF-8''{safe_title}.zip"
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": filename_header},
+    )
+
+
 @router.get("/{project_id}/files", response_model=List[ProjectFileResponse])
 def list_files(
     project_id: str,
@@ -208,6 +252,63 @@ def create_file(
         path=file_data.path,
         blob_ref=blob_ref,
         size=len(content),
+    )
+    db.add(file)
+    db.commit()
+    db.refresh(file)
+    return file
+
+
+@router.post(
+    "/{project_id}/files/upload",
+    response_model=ProjectFileResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def upload_binary_file(
+    project_id: str,
+    upload_data: ProjectFileBinaryUpload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload a binary file (base64-encoded) to the project."""
+    get_project_with_access(
+        project_id, current_user.id, db, minimum_role=ProjectRole.EDITOR
+    )
+
+    try:
+        file_bytes = base64.b64decode(upload_data.content_base64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 content")
+
+    bucket = minio_service._default_bucket
+    blob_ref = f"{project_id}/{upload_data.path}"
+
+    try:
+        minio_service.upload_file(bucket, blob_ref, file_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
+
+    existing = (
+        db.query(ProjectFile)
+        .filter(
+            ProjectFile.project_id == project_id,
+            ProjectFile.path == upload_data.path,
+        )
+        .first()
+    )
+
+    if existing:
+        existing.blob_ref = blob_ref
+        existing.size = len(file_bytes)
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    file = ProjectFile(
+        project_id=project_id,
+        path=upload_data.path,
+        blob_ref=blob_ref,
+        size=len(file_bytes),
     )
     db.add(file)
     db.commit()

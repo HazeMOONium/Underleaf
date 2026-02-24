@@ -1,7 +1,7 @@
 import secrets
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Integer, Enum as SQLEnum, UniqueConstraint
+from sqlalchemy import Boolean, Column, String, DateTime, ForeignKey, Text, Integer, Enum as SQLEnum, UniqueConstraint
 from sqlalchemy.orm import relationship
 import enum
 from app.core.database import Base
@@ -38,6 +38,10 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
     role = Column(SQLEnum(UserRole), default=UserRole.USER, nullable=False)
+    # email_verified: False until the user clicks the link in the verification email.
+    # Kept separate from the auth flow — unverified users can still log in, but the
+    # frontend shows a persistent banner prompting them to verify.
+    email_verified = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     projects = relationship("Project", back_populates="owner")

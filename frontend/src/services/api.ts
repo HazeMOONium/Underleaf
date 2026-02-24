@@ -28,11 +28,17 @@ export const authApi = {
 
   me: () => api.get<User>('/auth/me'),
 
+  changePassword: (currentPassword: string, newPassword: string) =>
+    api.put('/auth/me/password', { current_password: currentPassword, new_password: newPassword }),
+
   forgotPassword: (email: string) =>
     api.post('/auth/forgot-password', { email }),
 
   resetPassword: (token: string, newPassword: string) =>
     api.post('/auth/reset-password', { token, new_password: newPassword }),
+
+  verifyEmail: (token: string) =>
+    api.post('/auth/verify-email', { token }),
 }
 
 export const projectsApi = {
@@ -64,6 +70,12 @@ export const projectsApi = {
     api.patch<ProjectFile>(`/projects/${projectId}/files/${oldPath}`, {
       new_path: newPath,
     }),
+
+  uploadBinaryFile: (projectId: string, path: string, contentBase64: string) =>
+    api.post(`/projects/${projectId}/files/upload`, { path, content_base64: contentBase64 }),
+
+  exportZip: (projectId: string) =>
+    api.get(`/projects/${projectId}/export/zip`, { responseType: 'blob' }),
 }
 
 export const compileApi = {

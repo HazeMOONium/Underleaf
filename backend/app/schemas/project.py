@@ -48,6 +48,11 @@ class ProjectFileRename(BaseModel):
     new_path: str
 
 
+class ProjectFileBinaryUpload(BaseModel):
+    path: str
+    content_base64: str
+
+
 class FileTreeNode(BaseModel):
     name: str
     path: str

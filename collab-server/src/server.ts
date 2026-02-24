@@ -90,6 +90,37 @@ const persistence = {
 setPersistence(persistence)
 console.log('Redis persistence enabled')
 
+// Periodic snapshot: save all active docs every 60s so state survives server crashes
+// (the writeState persistence hook only fires on full disconnect)
+const activeDocs = new Map<string, Y.Doc>()
+
+const _origBindState = persistence.bindState.bind(persistence)
+persistence.bindState = async (docName: string, ydoc: Y.Doc) => {
+  await _origBindState(docName, ydoc)
+  activeDocs.set(docName, ydoc)
+}
+
+const _origWriteState = persistence.writeState.bind(persistence)
+persistence.writeState = async (docName: string, ydoc: Y.Doc) => {
+  await _origWriteState(docName, ydoc)
+  // Remove from active tracking only when no connections remain
+  if (!connectionCounts.has(docName)) {
+    activeDocs.delete(docName)
+  }
+}
+
+setInterval(async () => {
+  for (const [docName, ydoc] of activeDocs) {
+    try {
+      const key = `yjs:doc:${docName}`
+      const state = Y.encodeStateAsUpdate(ydoc)
+      await redis.set(key, Buffer.from(state))
+    } catch (err) {
+      console.error(`Periodic snapshot failed for ${docName}:`, err)
+    }
+  }
+}, 60_000)
+
 const wss = new WebSocketServer({ port: PORT })
 
 console.log(`Yjs WebSocket server running on port ${PORT}`)
@@ -107,10 +138,27 @@ wss.on('listening', () => {
 const shutdown = async (signal: string) => {
   console.log(`${signal} received, shutting down gracefully...`)
 
-  // Close WebSocket server
+  // Close WebSocket server (stops accepting new connections)
   wss.close(() => {
     console.log('WebSocket server closed')
   })
+
+  // Flush all active docs to Redis before exiting so in-flight changes survive
+  // the shutdown. This is a best-effort save — individual failures are logged
+  // but don't block the shutdown sequence.
+  console.log(`Flushing ${activeDocs.size} active document(s) to Redis...`)
+  await Promise.allSettled(
+    Array.from(activeDocs.entries()).map(async ([docName, ydoc]) => {
+      try {
+        const key = `yjs:doc:${docName}`
+        const state = Y.encodeStateAsUpdate(ydoc)
+        await redis.set(key, Buffer.from(state))
+        console.log(`Flushed ${docName} (${state.length} bytes)`)
+      } catch (err) {
+        console.error(`Failed to flush ${docName} on shutdown:`, err)
+      }
+    })
+  )
 
   // Close Redis connection
   try {

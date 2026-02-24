@@ -79,6 +79,35 @@ def health_check():
     return {"status": "healthy"}
 
 
+@app.get("/ready")
+async def ready_check():
+    """Readiness probe — verifies DB and Redis are reachable."""
+    import asyncio
+    from fastapi.responses import JSONResponse
+    from app.core.database import engine
+    from app.services.redis_service import redis_service
+
+    errors: list[str] = []
+
+    # Check PostgreSQL
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            conn.execute(text("SELECT 1"))
+    except Exception as exc:
+        errors.append(f"db: {exc}")
+
+    # Check Redis (attempt a GET on a sentinel key; any response = reachable)
+    try:
+        await asyncio.wait_for(redis_service.get("__ready__"), timeout=2.0)
+    except Exception as exc:
+        errors.append(f"redis: {exc}")
+
+    if errors:
+        return JSONResponse(status_code=503, content={"status": "not ready", "errors": errors})
+    return {"status": "ready"}
+
+
 @app.get("/metrics")
 async def metrics_endpoint(request: Request):
     return await metrics(request)

@@ -8,6 +8,8 @@ import EditorPage from './pages/EditorPage'
 import InviteAcceptPage from './pages/InviteAcceptPage'
 import ForgotPasswordPage from './pages/ForgotPasswordPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
+import VerifyEmailPage from './pages/VerifyEmailPage'
+import ProfilePage from './pages/ProfilePage'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { token } = useAuthStore()
@@ -46,6 +48,16 @@ function App() {
       <Route path="/invite/:token" element={<InviteAcceptPage />} />
       <Route path="/forgot-password" element={<ForgotPasswordPage />} />
       <Route path="/reset-password" element={<ResetPasswordPage />} />
+      {/* Public route — no auth required, token comes from the email link */}
+      <Route path="/verify-email" element={<VerifyEmailPage />} />
+      <Route
+        path="/profile"
+        element={
+          <PrivateRoute>
+            <ProfilePage />
+          </PrivateRoute>
+        }
+      />
       <Route path="*" element={<Navigate to="/login" />} />
     </Routes>
   )

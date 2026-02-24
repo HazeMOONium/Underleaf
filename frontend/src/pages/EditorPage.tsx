@@ -39,6 +39,91 @@ interface AwarenessUser {
   }
 }
 
+// ── Feature A: LaTeX log parser ────────────────────────────────────────────
+
+interface LogIssue {
+  type: 'error' | 'warning'
+  file: string
+  line: number
+  message: string
+}
+
+function parseLatexLog(log: string): LogIssue[] {
+  const lines = log.split('\n')
+  const issues: LogIssue[] = []
+  const fileStack: string[] = ['main.tex']
+
+  const currentFile = () => fileStack[fileStack.length - 1] ?? 'main.tex'
+
+  let lineIdx = 0
+  while (lineIdx < lines.length) {
+    const line = lines[lineIdx]
+
+    // Track file context: `(./foo.tex` pushes a file
+    const fileOpenMatch = line.match(/\(\.\/([\w/.-]+\.(?:tex|bib|cls|sty))/i)
+    if (fileOpenMatch) {
+      fileStack.push(fileOpenMatch[1])
+    }
+    // Leading `)` may pop the stack (heuristic)
+    if (/^\)/.test(line) && fileStack.length > 1) {
+      fileStack.pop()
+    }
+
+    // Pattern: `./file.tex:N: message`
+    const fileLineMatch = line.match(/^\.\/([\w/.-]+\.tex):(\d+):\s*(.+)/)
+    if (fileLineMatch) {
+      issues.push({
+        type: 'error',
+        file: fileLineMatch[1],
+        line: parseInt(fileLineMatch[2], 10),
+        message: fileLineMatch[3].trim(),
+      })
+      lineIdx++
+      continue
+    }
+
+    // Pattern: `! LaTeX Error: ...` or `! ...`
+    if (/^!/.test(line)) {
+      const msg = line.replace(/^!\s*/, '').trim()
+      // Look ahead for `l.N` line reference
+      let refLine = 0
+      for (let j = lineIdx + 1; j < Math.min(lineIdx + 8, lines.length); j++) {
+        const lMatch = lines[j].match(/^l\.(\d+)\s/)
+        if (lMatch) {
+          refLine = parseInt(lMatch[1], 10)
+          break
+        }
+      }
+      issues.push({
+        type: 'error',
+        file: currentFile(),
+        line: refLine,
+        message: msg,
+      })
+      lineIdx++
+      continue
+    }
+
+    // Pattern: `Package XYZ Warning: ...` or `LaTeX Warning: ...`
+    const warnMatch = line.match(/^(?:Package\s+\S+\s+Warning|LaTeX\s+Warning|Class\s+\S+\s+Warning):\s*(.+)/i)
+    if (warnMatch) {
+      // Warnings may span multiple lines; grab the first line's content
+      issues.push({
+        type: 'warning',
+        file: currentFile(),
+        line: 0,
+        message: warnMatch[1].trim(),
+      })
+      lineIdx++
+      continue
+    }
+
+    lineIdx++
+  }
+
+  return issues.slice(0, 20)
+}
+
 export default function EditorPage() {
   const { projectId } = useParams<{ projectId: string }>()
   const { user } = useAuthStore()
@@ -58,7 +143,9 @@ export default function EditorPage() {
   const [newFolderName, setNewFolderName] = useState('')
   const [compileError, setCompileError] = useState<string | null>(null)
   const [compileLogs, setCompileLogs] = useState<string>('')
+  const [compileDuration, setCompileDuration] = useState<number | null>(null)
   const [lastJobId, setLastJobId] = useState<string | null>(null)
+  const compileStartRef = useRef<number>(0)
   const [previewTab, setPreviewTab] = useState<'pdf' | 'logs' | 'files'>('pdf')
   const [connectedUsers, setConnectedUsers] = useState<AwarenessUser[]>([])
   const [showAIPanel, setShowAIPanel] = useState(false)
@@ -69,6 +156,19 @@ export default function EditorPage() {
   const [showCommentsPanel, setShowCommentsPanel] = useState(false)
   const [commentFocusLine, setCommentFocusLine] = useState<number | null>(null)
 
+  // Feature A: structured log parsing
+  const [issuesExpanded, setIssuesExpanded] = useState(true)
+
+  // Feature B: sidebar drag-and-drop upload
+  const [sidebarDragOver, setSidebarDragOver] = useState(false)
+
+  // Feature C: \ref / \cite completion labels
+  const [projectLabels, setProjectLabels] = useState<string[]>([])
+  const [projectCites, setProjectCites] = useState<string[]>([])
+  const labelsRef = useRef<string[]>([])
+  const citesRef = useRef<string[]>([])
+  const completionProviderRef = useRef<{ dispose: () => void } | null>(null)
+
   // Role-based access control
   // null = still loading | false = loaded, not a member | ProjectRole = active role
   const myRole = useProjectRole(projectId)
@@ -78,6 +178,10 @@ export default function EditorPage() {
   // ownerRole available for future use (e.g. member management UI guard)
   const _ownerRole = myRole ? canManageMembers(myRole) : false
   void _ownerRole
+
+  // Keep refs in sync with state so completion provider closure always reads fresh data
+  labelsRef.current = projectLabels
+  citesRef.current = projectCites
 
   const queryClient = useQueryClient()
   const mountedRef = useRef(true)
@@ -469,6 +573,8 @@ export default function EditorPage() {
       setCompiling(true)
       setCompileError(null)
       setCompileLogs('')
+      setCompileDuration(null)
+      compileStartRef.current = Date.now()
     },
     onSuccess: (res) => {
       toast.success('Compile job started')
@@ -508,7 +614,9 @@ export default function EditorPage() {
           clearInterval(interval)
           setCompiling(false)
           setCompileError(null)
-          toast.success('Compilation complete')
+          const elapsed = (Date.now() - compileStartRef.current) / 1000
+          setCompileDuration(elapsed)
+          toast.success(`Compiled in ${elapsed.toFixed(1)}s`)
           // Fetch PDF
           try {
             const res = await compileApi.getArtifact(jobId)
@@ -786,6 +894,126 @@ export default function EditorPage() {
     setEditorMounted(true)
   }
 
+  // ── Feature C: Scan project files for \label and \bibitem/@ keys ──────────
+  useEffect(() => {
+    if (!editorMounted || !files || !projectId) return
+
+    let cancelled = false
+
+    const scan = async () => {
+      const labels: string[] = []
+      const cites: string[] = []
+
+      const texFiles = files.filter((f) => f.path.endsWith('.tex'))
+      const bibFiles = files.filter((f) => f.path.endsWith('.bib'))
+
+      await Promise.all([
+        ...texFiles.map(async (f) => {
+          try {
+            const res = await projectsApi.getFile(projectId, f.path)
+            const text = typeof res.data === 'string'
+              ? res.data
+              : ((res.data as { content?: string })?.content ?? '')
+            const matches = text.matchAll(/\\label\{([^}]+)\}/g)
+            for (const m of matches) labels.push(m[1])
+          } catch {
+            // Ignore missing/inaccessible files
+          }
+        }),
+        ...bibFiles.map(async (f) => {
+          try {
+            const res = await projectsApi.getFile(projectId, f.path)
+            const text = typeof res.data === 'string'
+              ? res.data
+              : ((res.data as { content?: string })?.content ?? '')
+            // @article{key, / @book{key, / \bibitem{key}
+            const atMatches = text.matchAll(/@\w+\{([^,\s}]+)/g)
+            for (const m of atMatches) cites.push(m[1])
+            const bibitems = text.matchAll(/\\bibitem(?:\[.*?\])?\{([^}]+)\}/g)
+            for (const m of bibitems) cites.push(m[1])
+          } catch {
+            // Ignore
+          }
+        }),
+      ])
+
+      if (cancelled) return
+      setProjectLabels([...new Set(labels)])
+      setProjectCites([...new Set(cites)])
+    }
+
+    scan().catch(console.error)
+
+    return () => {
+      cancelled = true
+    }
+  }, [editorMounted, files, projectId])
+
+  // ── Feature C: Register Monaco \ref/\cite completion provider ─────────────
+  useEffect(() => {
+    if (!editorMounted) return
+
+    const monaco = (window as any).monaco
+    if (!monaco) return
+
+    // Dispose any previous provider
+    completionProviderRef.current?.dispose()
+
+    const provider = monaco.languages.registerCompletionItemProvider('latex', {
+      triggerCharacters: ['{'],
+      provideCompletionItems: (model: any, position: any) => {
+        const lineText: string = model.getValueInRange({
+          startLineNumber: position.lineNumber,
+          startColumn: 1,
+          endLineNumber: position.lineNumber,
+          endColumn: position.column,
+        })
+
+        const refMatch = lineText.match(/\\(?:ref|eqref|cref|Cref|autoref|pageref)\{([^}]*)$/)
+        const citeMatch = lineText.match(/\\(?:cite|citep|citet|citealt|citealp|nocite)\{([^}]*)$/)
+
+        if (!refMatch && !citeMatch) return { suggestions: [] }
+
+        const typedPrefix = (refMatch ?? citeMatch)![1]
+        const wordRange = {
+          startLineNumber: position.lineNumber,
+          endLineNumber: position.lineNumber,
+          startColumn: position.column - typedPrefix.length,
+          endColumn: position.column,
+        }
+
+        if (refMatch) {
+          return {
+            suggestions: labelsRef.current.map((lbl) => ({
+              label: lbl,
+              kind: monaco.languages.CompletionItemKind.Reference,
+              insertText: lbl,
+              range: wordRange,
+              documentation: `\\label{${lbl}}`,
+            })),
+          }
+        }
+
+        return {
+          suggestions: citesRef.current.map((key) => ({
+            label: key,
+            kind: monaco.languages.CompletionItemKind.Value,
+            insertText: key,
+            range: wordRange,
+            documentation: `BibTeX key: ${key}`,
+          })),
+        }
+      },
+    })
+
+    completionProviderRef.current = provider
+
+    return () => {
+      provider.dispose()
+      completionProviderRef.current = null
+    }
+  }, [editorMounted])
+
   const handleOutlineNavigate = (line: number) => {
     if (editorRef.current) {
       editorRef.current.revealLineInCenter(line)
@@ -808,6 +1036,81 @@ export default function EditorPage() {
 
   // Memoized outline
   const outlineContent = useMemo(() => content, [content])
+
+  // ── Feature A: parsed log issues ─────────────────────────────────────────
+  const logIssues = useMemo(() => (compileLogs ? parseLatexLog(compileLogs) : []), [compileLogs])
+  const logErrorCount = logIssues.filter((i) => i.type === 'error').length
+  const logWarningCount = logIssues.filter((i) => i.type === 'warning').length
+
+  // ── Feature B: sidebar drag-and-drop upload handlers ─────────────────────
+  const handleSidebarDragOver = useCallback((e: React.DragEvent) => {
+    if (!editorRole) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+    setSidebarDragOver(true)
+  }, [editorRole])
+
+  const handleSidebarDragLeave = useCallback((e: React.DragEvent) => {
+    // Only clear if leaving the aside element itself (not a child)
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return
+    setSidebarDragOver(false)
+  }, [])
+
+  const handleSidebarDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault()
+      setSidebarDragOver(false)
+      if (!editorRole || !projectId) return
+
+      const droppedFiles = Array.from(e.dataTransfer.files)
+      if (droppedFiles.length === 0) return
+
+      const textExts = ['.tex', '.bib', '.txt', '.md', '.cls', '.sty', '.cfg']
+      const binaryExts = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.pdf']
+
+      await Promise.all(
+        droppedFiles.map((file) => {
+          return new Promise<void>((resolve) => {
+            const ext = '.' + (file.name.split('.').pop() ?? '').toLowerCase()
+            const reader = new FileReader()
+
+            if (textExts.includes(ext)) {
+              reader.onload = async () => {
+                try {
+                  await projectsApi.createFile(projectId, file.name, reader.result as string)
+                  toast.success(`Uploaded: ${file.name}`)
+                } catch {
+                  toast.error(`Failed to upload ${file.name}`)
+                }
+                resolve()
+              }
+              reader.readAsText(file)
+            } else if (binaryExts.includes(ext)) {
+              reader.onload = async () => {
+                try {
+                  // Strip the data URL prefix to get raw base64
+                  const dataUrl = reader.result as string
+                  const base64 = dataUrl.split(',')[1] ?? ''
+                  await projectsApi.uploadBinaryFile(projectId, file.name, base64)
+                  toast.success(`Uploaded: ${file.name}`)
+                } catch {
+                  toast.error(`Failed to upload ${file.name}`)
+                }
+                resolve()
+              }
+              reader.readAsDataURL(file)
+            } else {
+              toast.error(`Unsupported file type: ${file.name}`)
+              resolve()
+            }
+          })
+        }),
+      )
+
+      queryClient.invalidateQueries({ queryKey: ['files', projectId] })
+    },
+    [editorRole, projectId, queryClient],
+  )
 
   const localUserColor = userColor(user?.id || '')
   const localUserInitial = (user?.email?.[0] ?? 'U').toUpperCase()
@@ -862,6 +1165,9 @@ export default function EditorPage() {
           </div>
         </div>
         <div style={styles.headerRight}>
+          <Link to="/profile" style={styles.headerBtn} title="Profile & Settings">
+            Profile
+          </Link>
           <button style={styles.headerBtn} onClick={handleShare} title="Manage collaborators">
             👥 Share
           </button>
@@ -916,7 +1222,19 @@ export default function EditorPage() {
 
       <div style={styles.main}>
         {/* ── Sidebar ──────────────────────────────────────────────────── */}
-        <aside style={styles.sidebar} className="dark-panel">
+        <aside
+          style={styles.sidebar}
+          className="dark-panel"
+          onDragOver={handleSidebarDragOver}
+          onDragLeave={handleSidebarDragLeave}
+          onDrop={handleSidebarDrop}
+        >
+          {/* Drag-over overlay */}
+          {sidebarDragOver && (
+            <div style={styles.sidebarDropOverlay}>
+              <div style={styles.sidebarDropLabel}>Drop files to upload</div>
+            </div>
+          )}
           <div style={styles.sidebarHeader}>
             <span style={styles.sidebarLabel}>FILES</span>
             {editorRole && (
@@ -1018,12 +1336,42 @@ export default function EditorPage() {
                   onClick={() => setPreviewTab(tab)}
                 >
                   {tab === 'pdf' ? 'PDF' : tab === 'logs' ? 'Logs' : 'Files'}
-                  {tab === 'logs' && compileError && (
+                  {tab === 'logs' && compileLogs && (logErrorCount > 0 || logWarningCount > 0) && (
+                    <span style={styles.logsBadge}>
+                      {logErrorCount > 0 && (
+                        <span style={styles.logsBadgeError}>{logErrorCount}E</span>
+                      )}
+                      {logWarningCount > 0 && (
+                        <span style={styles.logsBadgeWarn}>{logWarningCount}W</span>
+                      )}
+                    </span>
+                  )}
+                  {tab === 'logs' && compileError && logErrorCount === 0 && logWarningCount === 0 && (
                     <span style={styles.tabErrorDot} />
                   )}
                 </button>
               ))}
             </div>
+            {pdfUrl && (
+              <a
+                href={pdfUrl}
+                download={`${project?.title ?? 'output'}.pdf`}
+                title="Download PDF"
+                style={{
+                  fontSize: '11px',
+                  padding: '4px 8px',
+                  background: 'rgba(255,255,255,0.08)',
+                  border: '1px solid rgba(255,255,255,0.15)',
+                  borderRadius: '4px',
+                  color: '#ccc',
+                  textDecoration: 'none',
+                  flexShrink: 0,
+                  lineHeight: 1.4,
+                }}
+              >
+                ↓ PDF
+              </a>
+            )}
             {editorRole && (
               <button
                 className="primary"
@@ -1081,6 +1429,67 @@ export default function EditorPage() {
                   {!compileError && (
                     <div style={styles.logsSuccess}>
                       ✓ Compilation succeeded
+                      {compileDuration !== null && (
+                        <span style={{ marginLeft: '8px', opacity: 0.7, fontSize: '11px' }}>
+                          ({compileDuration.toFixed(1)}s)
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {/* ── Issues list (Feature A) ── */}
+                  {logIssues.length > 0 && (
+                    <div style={styles.issuesPanel}>
+                      <button
+                        style={styles.issuesToggle}
+                        onClick={() => setIssuesExpanded((v) => !v)}
+                      >
+                        <span style={styles.issuesToggleIcon}>{issuesExpanded ? '▾' : '▸'}</span>
+                        Issues
+                        <span style={styles.issuesSummary}>
+                          {logErrorCount > 0 && (
+                            <span style={styles.issuesBadgeError}>{logErrorCount} error{logErrorCount !== 1 ? 's' : ''}</span>
+                          )}
+                          {logWarningCount > 0 && (
+                            <span style={styles.issuesBadgeWarn}>{logWarningCount} warning{logWarningCount !== 1 ? 's' : ''}</span>
+                          )}
+                        </span>
+                      </button>
+                      {issuesExpanded && (
+                        <div style={styles.issuesList}>
+                          {logIssues.map((issue, idx) => {
+                            const shortFile = issue.file.split('/').pop() ?? issue.file
+                            const shortMsg = issue.message.length > 80
+                              ? issue.message.slice(0, 80) + '…'
+                              : issue.message
+                            return (
+                              <button
+                                key={idx}
+                                style={styles.issueItem}
+                                onClick={() => {
+                                  if (issue.line > 0) {
+                                    if (issue.file !== currentFile) setCurrentFile(issue.file)
+                                    setTimeout(() => {
+                                      editorRef.current?.revealLineInCenter(issue.line)
+                                      editorRef.current?.setPosition({ lineNumber: issue.line, column: 1 })
+                                      editorRef.current?.focus()
+                                    }, 50)
+                                  }
+                                }}
+                                title={issue.message}
+                              >
+                                <span style={{
+                                  ...styles.issueDot,
+                                  backgroundColor: issue.type === 'error' ? '#ef4444' : '#f59e0b',
+                                }} />
+                                <span style={styles.issueFile}>
+                                  {shortFile}{issue.line > 0 ? `:${issue.line}` : ''}
+                                </span>
+                                <span style={styles.issueMsg}>{shortMsg}</span>
+                              </button>
+                            )
+                          })}
+                        </div>
+                      )}
                     </div>
                   )}
                   <pre style={styles.logsContent}>{compileLogs}</pre>
@@ -1100,6 +1509,34 @@ export default function EditorPage() {
             )}
 
             {/* ── Files tab ── */}
+            {previewTab === 'files' && (
+              <div style={styles.filesList}>
+                <button
+                  style={{ ...styles.fileItem, cursor: 'pointer' }}
+                  onClick={async () => {
+                    try {
+                      const res = await projectsApi.exportZip(projectId!)
+                      const blob = new Blob([res.data], { type: 'application/zip' })
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = `${project?.title ?? 'project'}.zip`
+                      a.click()
+                      URL.revokeObjectURL(url)
+                    } catch {
+                      toast.error('Failed to export ZIP')
+                    }
+                  }}
+                >
+                  <span style={styles.fileItemIcon}>📦</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={styles.fileItemName}>{project?.title ?? 'project'}.zip</div>
+                    <div style={styles.fileItemMeta}>Download all source files</div>
+                  </div>
+                  <span style={styles.fileItemDownload}>↓</span>
+                </button>
+              </div>
+            )}
             {previewTab === 'files' && (
               lastJobId ? (
                 <div style={styles.filesList}>
@@ -1357,6 +1794,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     flexShrink: 0,
+    position: 'relative' as const,
   },
   sidebarHeader: {
     display: 'flex',
@@ -1620,5 +2058,141 @@ const styles: Record<string, React.CSSProperties> = {
     textDecoration: 'none',
     fontWeight: 600,
     fontSize: 14,
+  },
+  // ── Feature A: log issues panel ──────────────────────────────────────
+  logsBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '3px',
+    marginLeft: '4px',
+  },
+  logsBadgeError: {
+    backgroundColor: '#ef4444',
+    color: '#fff',
+    borderRadius: '3px',
+    fontSize: '9px',
+    fontWeight: 700,
+    padding: '1px 4px',
+    lineHeight: 1.4,
+  },
+  logsBadgeWarn: {
+    backgroundColor: '#f59e0b',
+    color: '#fff',
+    borderRadius: '3px',
+    fontSize: '9px',
+    fontWeight: 700,
+    padding: '1px 4px',
+    lineHeight: 1.4,
+  },
+  issuesPanel: {
+    flexShrink: 0,
+    borderBottom: '1px solid rgba(255,255,255,0.08)',
+    maxHeight: '220px',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    overflow: 'hidden',
+  },
+  issuesToggle: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '7px 12px',
+    fontSize: '11px',
+    fontWeight: 600,
+    color: '#c9d1d9',
+    background: 'rgba(255,255,255,0.04)',
+    border: 'none',
+    borderBottom: '1px solid rgba(255,255,255,0.06)',
+    cursor: 'pointer',
+    textAlign: 'left' as const,
+    flexShrink: 0,
+    width: '100%',
+  },
+  issuesToggleIcon: {
+    fontSize: '10px',
+    width: '12px',
+    display: 'inline-block',
+  },
+  issuesSummary: {
+    display: 'flex',
+    gap: '4px',
+    marginLeft: 'auto',
+  },
+  issuesBadgeError: {
+    backgroundColor: '#ef4444',
+    color: '#fff',
+    borderRadius: '3px',
+    fontSize: '9px',
+    fontWeight: 700,
+    padding: '1px 5px',
+  },
+  issuesBadgeWarn: {
+    backgroundColor: '#f59e0b',
+    color: '#fff',
+    borderRadius: '3px',
+    fontSize: '9px',
+    fontWeight: 700,
+    padding: '1px 5px',
+  },
+  issuesList: {
+    flex: 1,
+    overflowY: 'auto' as const,
+  },
+  issueItem: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: '6px',
+    padding: '5px 12px',
+    fontSize: '11px',
+    background: 'none',
+    border: 'none',
+    borderBottom: '1px solid rgba(255,255,255,0.04)',
+    cursor: 'pointer',
+    width: '100%',
+    textAlign: 'left' as const,
+    color: '#c9d1d9',
+    lineHeight: 1.4,
+    transition: 'background 0.1s',
+  },
+  issueDot: {
+    width: '6px',
+    height: '6px',
+    borderRadius: '50%',
+    display: 'inline-block',
+    flexShrink: 0,
+    marginTop: '3px',
+  },
+  issueFile: {
+    flexShrink: 0,
+    fontWeight: 600,
+    color: '#94a3b8',
+    fontSize: '10px',
+  },
+  issueMsg: {
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
+    flex: 1,
+    minWidth: 0,
+  },
+  // ── Feature B: sidebar drop overlay ──────────────────────────────────
+  sidebarDropOverlay: {
+    position: 'absolute' as const,
+    inset: 0,
+    zIndex: 50,
+    border: '2px dashed rgba(26,127,75,0.7)',
+    borderRadius: '4px',
+    backgroundColor: 'rgba(26,127,75,0.12)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    pointerEvents: 'none' as const,
+  },
+  sidebarDropLabel: {
+    fontSize: '12px',
+    fontWeight: 600,
+    color: '#4ade80',
+    textAlign: 'center' as const,
+    padding: '8px',
   },
 }
