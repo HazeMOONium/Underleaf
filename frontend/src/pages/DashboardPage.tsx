@@ -86,11 +86,27 @@ async function downloadProjectZip(projectId: string, title: string) {
   }
 }
 
+function relativeTime(dateStr: string): string {
+  const now = Date.now()
+  const then = new Date(dateStr).getTime()
+  const diff = now - then
+  const secs = Math.floor(diff / 1000)
+  const mins = Math.floor(secs / 60)
+  const hours = Math.floor(mins / 60)
+  const days = Math.floor(hours / 24)
+  if (secs < 60) return 'just now'
+  if (mins < 60) return `${mins} minute${mins !== 1 ? 's' : ''} ago`
+  if (hours < 24) return `${hours} hour${hours !== 1 ? 's' : ''} ago`
+  if (days < 7) return `${days} day${days !== 1 ? 's' : ''} ago`
+  return new Date(dateStr).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
 export default function DashboardPage() {
   const [newProjectTitle, setNewProjectTitle] = useState('')
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameTitle, setRenameTitle] = useState('')
+  const [search, setSearch] = useState('')
   const renameInputRef = useRef<HTMLInputElement>(null)
   const { user, logout } = useAuthStore()
   const navigate = useNavigate()
@@ -185,7 +201,6 @@ export default function DashboardPage() {
           </div>
         </div>
         <div style={styles.headerRight}>
-          <span style={styles.userEmail}>{user?.email}</span>
           <Link to="/profile" style={styles.profileLink} title="Profile & Settings">
             Profile
           </Link>
@@ -222,6 +237,33 @@ export default function DashboardPage() {
           </button>
         </div>
 
+        {/* Search bar */}
+        {!isLoading && (projects?.length ?? 0) > 0 && (
+          <div style={styles.searchRow}>
+            <div style={styles.searchWrap}>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                style={styles.searchIcon}
+              >
+                <circle cx="11" cy="11" r="8"/>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+              </svg>
+              <input
+                type="search"
+                placeholder="Search projects…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                style={styles.searchInput}
+              />
+            </div>
+          </div>
+        )}
+
         {isLoading ? (
           <div style={styles.grid}>
             {[1, 2, 3].map((i) => (
@@ -243,25 +285,38 @@ export default function DashboardPage() {
               + Create project
             </button>
           </div>
-        ) : (
-          <div style={styles.grid}>
-            {projects?.map((project, idx) => (
-              <ProjectCard
-                key={project.id}
-                project={project}
-                idx={idx}
-                renamingId={renamingId}
-                renameTitle={renameTitle}
-                renameInputRef={renameInputRef}
-                onRenameChange={setRenameTitle}
-                onRenameSubmit={submitRename}
-                onRenameCancel={() => setRenamingId(null)}
-                onStartRename={startRename}
-                onDelete={handleDelete}
-              />
-            ))}
-          </div>
-        )}
+        ) : (() => {
+          const filtered = (projects ?? []).filter((p) =>
+            p.title.toLowerCase().includes(search.toLowerCase())
+          )
+          if (filtered.length === 0 && search) {
+            return (
+              <div style={styles.empty} className="animate-fade-in">
+                <p style={styles.emptyTitle}>No projects match your search.</p>
+                <p style={styles.emptyText}>Try a different search term.</p>
+              </div>
+            )
+          }
+          return (
+            <div style={styles.grid}>
+              {filtered.map((project, idx) => (
+                <ProjectCard
+                  key={project.id}
+                  project={project}
+                  idx={idx}
+                  renamingId={renamingId}
+                  renameTitle={renameTitle}
+                  renameInputRef={renameInputRef}
+                  onRenameChange={setRenameTitle}
+                  onRenameSubmit={submitRename}
+                  onRenameCancel={() => setRenamingId(null)}
+                  onStartRename={startRename}
+                  onDelete={handleDelete}
+                />
+              ))}
+            </div>
+          )
+        })()}
       </main>
 
       {/* Create modal */}
@@ -396,12 +451,8 @@ function ProjectCard({
           <span className={`badge ${isPrivate ? 'badge-gray' : 'badge-green'}`}>
             {isPrivate ? '🔒 Private' : '🌐 Public'}
           </span>
-          <span style={cardStyles.date}>
-            {new Date(project.updated_at).toLocaleDateString(undefined, {
-              year: 'numeric',
-              month: 'short',
-              day: 'numeric',
-            })}
+          <span style={cardStyles.date} title={new Date(project.updated_at).toLocaleString()}>
+            {relativeTime(project.updated_at)}
           </span>
         </div>
       </div>
@@ -607,6 +658,35 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '6px',
     padding: '9px 18px',
     fontSize: '13px',
+  },
+  searchRow: {
+    marginBottom: '20px',
+  },
+  searchWrap: {
+    position: 'relative' as const,
+    display: 'inline-flex',
+    alignItems: 'center',
+    width: '100%',
+    maxWidth: '320px',
+  },
+  searchIcon: {
+    position: 'absolute' as const,
+    left: '10px',
+    color: 'var(--color-text-light)',
+    pointerEvents: 'none' as const,
+    flexShrink: 0,
+  },
+  searchInput: {
+    width: '100%',
+    paddingLeft: '32px',
+    paddingRight: '12px',
+    paddingTop: '7px',
+    paddingBottom: '7px',
+    fontSize: '13px',
+    border: '1.5px solid var(--color-border)',
+    borderRadius: 'var(--radius-md)',
+    background: 'var(--color-surface)',
+    color: 'var(--color-text)',
   },
   grid: {
     display: 'grid',

@@ -74,6 +74,18 @@ test-results/
 .playwright-mcp/
 playwright-report/
 
+# Screenshots (Playwright exploration, temp)
+*.png
+*.jpeg
+*.jpg
+!frontend/public/**
+!frontend/src/**
+*:Zone.Identifier
+
+# Agent / tool files
+.agents/
+skills-lock.json
+
 # IDE/Tool configs
 .mcp.json
 opencode.json

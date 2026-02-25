@@ -27,7 +27,7 @@
 
   /* Borders */
   --color-border: #e2e8f0;
-  --color-border-focus: #3b82f6;
+  --color-border-focus: #1a7f4b;
 
   /* Semantic */
   --color-primary: #1a7f4b;
@@ -152,12 +152,42 @@ input:focus,
 textarea:focus {
   outline: none;
   border-color: var(--color-border-focus);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+  box-shadow: 0 0 0 3px rgba(26, 127, 75, 0.12);
 }
 
 input::placeholder,
 textarea::placeholder {
   color: var(--color-text-light);
+}
+
+/* ─── Password field with show/hide toggle ───────────────────────────────── */
+.password-field {
+  position: relative;
+}
+.password-field input {
+  padding-right: 40px;
+}
+.password-field .eye-btn {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  color: var(--color-text-light);
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast);
+  box-shadow: none;
+}
+.password-field .eye-btn:hover {
+  color: var(--color-text-muted);
+  background: none;
+  transform: translateY(-50%);
+  box-shadow: none;
 }
 
 /* ─── Links ──────────────────────────────────────────────────────────────── */

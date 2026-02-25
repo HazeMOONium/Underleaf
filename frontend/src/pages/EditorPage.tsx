@@ -1169,7 +1169,7 @@ export default function EditorPage() {
             Profile
           </Link>
           <button style={styles.headerBtn} onClick={handleShare} title="Manage collaborators">
-            👥 Share
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginRight:5,verticalAlign:'middle'}}><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>Share
           </button>
           {commenterRole && (
             <button
@@ -1180,7 +1180,7 @@ export default function EditorPage() {
               onClick={() => setShowCommentsPanel((v) => !v)}
               title="Comments"
             >
-              💬 Comments
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginRight:5,verticalAlign:'middle'}}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Comments
             </button>
           )}
           <button
@@ -1191,10 +1191,10 @@ export default function EditorPage() {
             onClick={() => setShowAIPanel((v) => !v)}
             title="AI Assistant"
           >
-            ✨ AI
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginRight:5,verticalAlign:'middle'}}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>AI
           </button>
           <button style={styles.headerBtn} onClick={handleDownload}>
-            ↓ Download
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginRight:5,verticalAlign:'middle'}}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Download
           </button>
           {editorRole && (
             <button
@@ -1202,7 +1202,9 @@ export default function EditorPage() {
               onClick={() => saveFile.mutate()}
               disabled={saving}
             >
-              {saving ? '⏳ Saving…' : '💾 Save'}
+              {saving
+                ? <><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginRight:5,verticalAlign:'middle'}} className="animate-spin"><circle cx="12" cy="12" r="10" strokeOpacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/></svg>Saving…</>
+                : <><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginRight:5,verticalAlign:'middle'}}><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save</>}
             </button>
           )}
           {editorRole && (
@@ -1213,8 +1215,8 @@ export default function EditorPage() {
               style={{ fontSize: '13px' }}
             >
               {compiling
-                ? <span className="animate-pulse">⚙ Compiling…</span>
-                : '▶ Compile'}
+                ? <><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginRight:5,verticalAlign:'middle'}} className="animate-spin"><circle cx="12" cy="12" r="10" strokeOpacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/></svg>Compiling…</>
+                : <><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginRight:5,verticalAlign:'middle'}}><polygon points="5 3 19 12 5 21 5 3"/></svg>Compile</>}
             </button>
           )}
         </div>
@@ -1244,7 +1246,9 @@ export default function EditorPage() {
                   onClick={() => handleCreateFolder('')}
                   title="New folder"
                 >
-                  📁
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                  </svg>
                 </button>
                 <button
                   style={styles.sidebarIconBtn}
@@ -1379,7 +1383,9 @@ export default function EditorPage() {
                 onClick={() => compile.mutate()}
                 disabled={compiling}
               >
-                {compiling ? <span className="animate-pulse">⚙…</span> : '▶'}
+                {compiling
+                  ? <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin"><circle cx="12" cy="12" r="10" strokeOpacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/></svg>
+                  : <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>}
               </button>
             )}
           </div>
@@ -1390,7 +1396,7 @@ export default function EditorPage() {
             {previewTab === 'pdf' && (
               compiling ? (
                 <div style={styles.previewEmpty}>
-                  <div className="animate-spin" style={{ fontSize: '24px', marginBottom: '12px' }}>⚙</div>
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin" style={{ marginBottom: '12px', color: 'var(--color-brand)' }}><circle cx="12" cy="12" r="10" strokeOpacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/></svg>
                   <p style={styles.previewEmptyText}>Compiling…</p>
                 </div>
               ) : pdfUrl ? (
@@ -1498,7 +1504,7 @@ export default function EditorPage() {
                 <div style={styles.previewEmpty}>
                   {compiling ? (
                     <>
-                      <div className="animate-spin" style={{ fontSize: '20px', marginBottom: '12px' }}>⚙</div>
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin" style={{ marginBottom: '12px', color: 'var(--color-brand)' }}><circle cx="12" cy="12" r="10" strokeOpacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/></svg>
                       <p style={styles.previewEmptyText}>Compiling — logs will appear here…</p>
                     </>
                   ) : (
@@ -1535,62 +1541,51 @@ export default function EditorPage() {
                   </div>
                   <span style={styles.fileItemDownload}>↓</span>
                 </button>
+                {lastJobId ? (
+                  <>
+                    {pdfUrl && (
+                      <a
+                        href={pdfUrl}
+                        download={`${project?.title ?? 'output'}.pdf`}
+                        style={styles.fileItem}
+                      >
+                        <span style={styles.fileItemIcon}>📄</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={styles.fileItemName}>{project?.title ?? 'output'}.pdf</div>
+                          <div style={styles.fileItemMeta}>PDF document</div>
+                        </div>
+                        <span style={styles.fileItemDownload}>↓</span>
+                      </a>
+                    )}
+                    {compileLogs && (
+                      <button
+                        style={styles.fileItem}
+                        onClick={() => downloadText(compileLogs, 'output.log')}
+                      >
+                        <span style={styles.fileItemIcon}>📋</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={styles.fileItemName}>output.log</div>
+                          <div style={styles.fileItemMeta}>Compilation log</div>
+                        </div>
+                        <span style={styles.fileItemDownload}>↓</span>
+                      </button>
+                    )}
+                    {syncTeXData && (
+                      <button
+                        style={styles.fileItem}
+                        onClick={() => downloadSyncTeX(lastJobId)}
+                      >
+                        <span style={styles.fileItemIcon}>🔗</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={styles.fileItemName}>output.synctex.gz</div>
+                          <div style={styles.fileItemMeta}>SyncTeX source-link data</div>
+                        </div>
+                        <span style={styles.fileItemDownload}>↓</span>
+                      </button>
+                    )}
+                  </>
+                ) : null}
               </div>
-            )}
-            {previewTab === 'files' && (
-              lastJobId ? (
-                <div style={styles.filesList}>
-                  {pdfUrl && (
-                    <a
-                      href={pdfUrl}
-                      download={`${project?.title ?? 'output'}.pdf`}
-                      style={styles.fileItem}
-                    >
-                      <span style={styles.fileItemIcon}>📄</span>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={styles.fileItemName}>{project?.title ?? 'output'}.pdf</div>
-                        <div style={styles.fileItemMeta}>PDF document</div>
-                      </div>
-                      <span style={styles.fileItemDownload}>↓</span>
-                    </a>
-                  )}
-                  {compileLogs && (
-                    <button
-                      style={styles.fileItem}
-                      onClick={() => downloadText(compileLogs, 'output.log')}
-                    >
-                      <span style={styles.fileItemIcon}>📋</span>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={styles.fileItemName}>output.log</div>
-                        <div style={styles.fileItemMeta}>Compilation log</div>
-                      </div>
-                      <span style={styles.fileItemDownload}>↓</span>
-                    </button>
-                  )}
-                  {syncTeXData && (
-                    <button
-                      style={styles.fileItem}
-                      onClick={() => downloadSyncTeX(lastJobId)}
-                    >
-                      <span style={styles.fileItemIcon}>🔗</span>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={styles.fileItemName}>output.synctex.gz</div>
-                        <div style={styles.fileItemMeta}>SyncTeX source-link data</div>
-                      </div>
-                      <span style={styles.fileItemDownload}>↓</span>
-                    </button>
-                  )}
-                  {!pdfUrl && !compileLogs && (
-                    <div style={styles.previewEmpty}>
-                      <p style={styles.previewEmptyText}>No output files available.</p>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div style={styles.previewEmpty}>
-                  <p style={styles.previewEmptyText}>No output files yet. Compile your project first.</p>
-                </div>
-              )
             )}
           </div>
         </aside>
