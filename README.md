@@ -1,302 +1,236 @@
-# System architecture — local, self-hosted Overleaf clone (production-grade)
+# Underleaf
 
-# 1 — Top-level architecture (diagram)
+A self-hosted, collaborative LaTeX editor — an open-source alternative to Overleaf. Write, compile, and share LaTeX documents in real time from your own infrastructure.
 
-```mermaid
-flowchart LR
-  subgraph Clients
-    Browser[Web SPA (monaco/codemirror)]
-    VSCodeExt[VS Code extension]
-    CLI[CLI / Git client]
-  end
+---
 
-  subgraph Edge
-    Proxy[Ingress Proxy (nginx/Traefik)]
-    Auth[Auth Service (OIDC/JWT)]
-  end
+## Features
 
-  subgraph App
-    API[Backend API (REST/GraphQL)]
-    Collab[Collaboration Service (CRDT: yjs / y-websocket)]
-    ProjectSvc[Project Service / File Index]
-    GitSync[Git Integration Service]
-    CompileQ[Compile Job Queue]
-    WorkerPool[Compile Workers (sandboxed)]
-    AI[AI Service (LLM hooks, safety)]
-    Search[Full-Text Search / AST Indexer]
-  end
+- **Real-time collaboration** — Multiple users edit simultaneously via Yjs CRDT with live cursors and presence indicators
+- **Monaco editor** — LaTeX syntax highlighting, autocomplete (`\ref`, `\cite`, environments), and inline diagnostics
+- **Integrated PDF preview** — Compile with pdflatex/xelatex/lualatex and view the PDF alongside your source; double-click to jump source ↔ PDF (SyncTeX)
+- **File management** — Nested file tree, drag-and-drop upload, folder creation, rename, delete, ZIP export
+- **Role-based access** — Owner / Editor / Commenter / Viewer per project, invite links, email invites
+- **Comments** — Threaded, file-anchored comments with resolve/re-open flow
+- **AI assistant** — Explain compile errors, suggest completions, rewrite selections (requires Anthropic API key)
+- **Auth & profiles** — JWT auth, email verification, forgot/reset password, profile page
+- **Production-ready infra** — Docker Compose, health/ready endpoints, GitHub Actions CI, Prometheus metrics
 
-  subgraph Data
-    PG[(Postgres metadata)]
-    Redis[(Redis: presence, cache, CRDT persistence)]
-    MinIO[(Object store: PDFs, artifacts, files)]
-    MQ[(Message queue: RabbitMQ / NATS)]
-    Logs[(ELK / Loki)]
-    Metrics[(Prometheus + Grafana)]
-  end
+---
 
-  Browser -->|HTTPS + WS| Proxy
-  VSCodeExt -->|HTTPS + WS| Proxy
-  CLI -->|git/http| Proxy
-  Proxy --> Auth
-  Proxy --> API
-  API --> Collab
-  Collab --> Redis
-  API --> ProjectSvc
-  ProjectSvc --> MinIO
-  API --> GitSync
-  API --> CompileQ
-  CompileQ --> MQ
-  MQ --> WorkerPool
-  WorkerPool --> MinIO
-  WorkerPool --> Logs
-  WorkerPool --> Metrics
-  API --> AI
-  AI --> Redis
-  API --> Search
-  API --> PG
-  API --> Redis
+## Quick Start
+
+### Prerequisites
+
+- Docker & Docker Compose v2+
+- Git
+
+### 1. Clone and configure
+
+```bash
+git clone https://github.com/<your-org>/underleaf.git
+cd underleaf
+cp .env.example .env
+# Edit .env — at minimum set SECRET_KEY, POSTGRES_PASSWORD, MINIO_ROOT_PASSWORD
+```
+
+### 2. Start all services
+
+```bash
+docker-compose -f deploy/docker-compose.dev.yml up --build
+```
+
+### 3. Open the app
+
+| Service | URL |
+|---------|-----|
+| Frontend | http://localhost:3000 |
+| Backend API + docs | http://localhost:18000/docs |
+| MinIO console | http://localhost:19001 |
+| RabbitMQ management | http://localhost:15672 |
+
+Register an account, create a project, and click **Compile** to run your first build.
+
+---
+
+## Architecture
+
+```
+Browser ──HTTPS+WS──► Frontend (React/Vite :3000)
+                          │
+                          │ /api proxy
+                          ▼
+                     Backend (FastAPI :18000)
+                     │       │       │
+                     ▼       ▼       ▼
+                PostgreSQL  MinIO  RabbitMQ
+                            │       │
+                            │       ▼
+                            │    Worker (pdflatex)
+                            │       │
+                            └───────┘ (PDF artifact upload)
+
+Browser ──WS──► Collab Server (Yjs :11234) ──► Redis
+```
+
+| Service | Technology | Role |
+|---------|-----------|------|
+| Frontend | React 18, Vite, Monaco Editor, Yjs | SPA editor + collaboration UI |
+| Backend | FastAPI, SQLAlchemy 2.0, Pydantic v2 | REST API, auth, job dispatch |
+| Collab server | Node.js, y-websocket | CRDT document sync |
+| Worker | Python, pdflatex | LaTeX compilation sandbox |
+| PostgreSQL | v15 | Persistent metadata |
+| Redis | v7 | Yjs snapshots, caching |
+| MinIO | RELEASE.2024 | File + PDF artifact storage |
+| RabbitMQ | v3 | Compile job queue |
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for detailed design documentation.
+
+---
+
+## Development Setup (without Docker)
+
+### Backend
+
+```bash
+cd backend
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+# Export env vars from .env, then:
+uvicorn app.main:app --reload --port 8000
+```
+
+### Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev   # http://localhost:3000
+```
+
+### Collab server
+
+```bash
+cd collab-server
+npm install
+node src/server.ts
+```
+
+### Database migrations
+
+```bash
+cd backend
+alembic upgrade head
+# After model changes:
+alembic revision --autogenerate -m "describe change"
 ```
 
 ---
 
-# 2 — Components & responsibilities (with recommended stack)
+## Testing
 
-Keep components small and testable. recommended stacks are pragmatic — swap for your preference.
+```bash
+# Backend (138 tests)
+cd backend && pytest
 
-**Client**
+# Single file or test
+cd backend && pytest tests/test_auth.py
+cd backend && pytest tests/test_auth.py::test_register
 
-* Web SPA: React + Monaco (or CodeMirror) with CRDT bindings (Yjs).
-* Features: editor, live preview, comments, version view, compile button.
-* VS Code extension that bridges local files → remote platform (thin client).
+# Frontend (Vitest)
+cd frontend && npm test
 
-**Ingress & Auth**
-
-* Reverse proxy: nginx or Traefik (TLS, HTTP/2, WebSocket proxying).
-* Auth: OAuth2 / OpenID Connect + JWT. Support local accounts and SSO. 2FA support.
-* RBAC: owner/editor/viewer roles per project.
-
-**Backend API**
-
-* Framework: FastAPI (Python) or Express/Node/Go. Expose REST and GraphQL where needed.
-* Responsibilities: projects, users, compile job submission, artifact retrieval, billing/quota, admin.
-* Stateless; scale horizontally.
-
-**Collaboration Service**
-
-* CRDT engine: Yjs with y-websocket (WebSocket server).
-* Persistence: snapshot CRDT document state to Redis or Postgres periodically.
-* Presence: Redis for presence + cursor positions.
-* Offline-first: clients can operate offline and merge via CRDT when back online.
-
-**Project Service + Storage**
-
-* Metadata: Postgres (projects, users, permissions, commits).
-* File blobs & artifacts: S3-compatible object store (MinIO for local).
-* Project layout: store canonical file tree + references to object storage.
-
-**Git Integration**
-
-* Git service: automatically commit snapshots or expose git endpoints.
-* Sync flows: push/pull from remote Git providers, and local export/import.
-
-**Compile Job Queue & Worker Pool**
-
-* Job queue: RabbitMQ, NATS or Redis Streams.
-* Worker pool: containerized compile workers. Workers consume jobs and run compilation in a sandbox, produce artifacts to MinIO and logs to central logging.
-* Pre-warmed pool: keep a pool of prepared containers to reduce latency.
-
-**Worker sandboxing**
-
-* Container runtime: Docker + strong isolation layer (gVisor or Kata containers).
-* Hardening: run as unprivileged user, seccomp filter, AppArmor profile, cgroups (resource limits), no network or egress via proxy whitelist, read-only mounts except a small writable overlay, disable shell-escape.
-* Build environment: latexmk/pdflatex/tectonic etc. Use multiple compile images for TeXlive vs Tectonic.
-
-**AI Service**
-
-* Small microservice that offers:
-
-  * grammar/citation suggestions.
-  * latex snippet generation (natural language → LaTeX), code completion.
-  * template generation.
-* Safety: RAG use with curated docs; output filter that strips or refuses to generate system commands or arbitrary code.
-* Implementation: local LLM models (if offline) or proxied to provider with prompt-safety layer.
-
-**Search & Indexing**
-
-* Index LaTeX AST or plain text into Elasticsearch or Postgres full-text for fast search (sections, labels, citations).
-* AST diffing for semantic diffs.
-
-**Logging & Monitoring**
-
-* Centralized logs: Loki/ELK.
-* Metrics: Prometheus + Grafana.
-* Tracing: OpenTelemetry.
-
----
-
-# 3 — Data model (core tables, simplified)
-
-```
-Users(id, email, hashed_pw, role, created_at)
-Projects(id, owner_id, title, visibility, settings, created_at)
-ProjectFiles(id, project_id, path, latest_blob_ref, size, updated_at)
-Snapshots(id, project_id, commit_sha, author_id, message, created_at)
-CompileJobs(id, project_id, snapshot_id, requester_id, status, logs_ref, artifact_ref, created_at, finished_at)
-Permissions(project_id, user_id, role)
-AIRequests(id, user_id, project_id, prompt_hash, response_ref, created_at)
+# All linters
+make lint
 ```
 
 ---
 
-# 4 — API surface (examples)
+## Configuration
 
-* `POST /api/v1/auth/login` — issue JWT
-* `GET  /api/v1/projects` — list
-* `POST /api/v1/projects` — create
-* `GET  /api/v1/projects/:id/files/*path` — fetch file
-* `PUT  /api/v1/projects/:id/files/*path` — save file (or CRDT persistence)
-* `POST /api/v1/projects/:id/compile` — enqueue compile job
-* `GET  /api/v1/compile/:job_id/status`
-* `GET  /api/v1/compile/:job_id/artifact` — download PDF
-* `POST /api/v1/projects/:id/snapshot` — create snapshot / git commit
-* `POST /api/v1/ai/suggest` — AI suggestions (rate limited / audited)
+All configuration is via environment variables. Copy `.env.example` to `.env`:
 
----
-
-# 5 — Sandbox & security rules (must-have)
-
-* **No arbitrary shell execution:** disable `\write18` and other TeX shell escape flags by default. If needed, explicitly whitelist safe commands and run in an isolated context.
-* **Container isolation:** workers run in unprivileged containers with gVisor/Kata for kernel isolation. Drop capabilities.
-* **Resource limits:** enforce CPU, memory, disk, and process count limits via cgroups.
-* **Filesystem:** read-only base images, writable ephemeral overlay with strict size cap.
-* **No direct outbound:** network disabled by default; if network is required (package fetch during build), run in a proxied egress with URL allowlist and request logging.
-* **Timeouts & watchdogs:** compilation timeouts and emergency kill on resource abuse.
-* **Audit & retention:** store compile logs, stdout/stderr, and a redacted version of build outputs for auditing. Retain artifacts per policy.
-* **Input sanitization:** reject files with suspicious patterns (e.g., suspicious format convertors) in CI safety checks.
-* **Static analysis on templates:** run sandbox tests and escape fuzzing in CI for every compile image or template published.
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SECRET_KEY` | JWT signing secret | — (required) |
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql+asyncpg://...` |
+| `REDIS_URL` | Redis connection URL | `redis://redis:6379` |
+| `MINIO_ENDPOINT` | MinIO host:port | `minio:9000` |
+| `MINIO_ROOT_USER` | MinIO access key | — (required) |
+| `MINIO_ROOT_PASSWORD` | MinIO secret key | — (required) |
+| `RABBITMQ_URL` | AMQP connection URL | `amqp://guest:guest@rabbitmq/` |
+| `SMTP_HOST` | Email server for verification/reset | — (optional) |
+| `SMTP_PORT` | Email server port | `587` |
+| `SMTP_USER` | Email credentials | — (optional) |
+| `SMTP_PASSWORD` | Email credentials | — (optional) |
+| `ANTHROPIC_API_KEY` | Claude API key for AI assistant | — (optional) |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | JWT lifetime | `1440` (24h) |
 
 ---
 
-# 6 — Local vs production deployment modes
+## API Reference
 
-**Local (single-machine)**
+Full API documentation is available at `http://localhost:18000/docs` (Swagger UI) when the backend is running.
 
-* Docker Compose:
-
-  * API, Collab server, Redis, Postgres, MinIO, RabbitMQ, one worker.
-* Good for dev, demos, and local self-host.
-
-**Team / Production**
-
-* Kubernetes:
-
-  * API horizontal autoscaling, StatefulSets for collab servers, worker pools as node pools with different resource classes, MinIO in distributed mode, Postgres with high availability.
-* Ingress via Traefik or nginx-ingress, cert-management (cert-manager).
-* Use PodSecurityPolicies or OPA Gatekeeper to enforce runtime restrictions.
+See [`docs/API.md`](docs/API.md) for a complete endpoint reference.
 
 ---
 
-# 7 — CI/CD, testing, and safety pipeline
+## Project Structure
 
-* **Source control:** git for platform code; store challenge/compile images and templates in a private registry.
-* **CI checks for compile images / templates:**
-
-  * Run escape tests (fuzzing), check resource usage, static analysis for suspicious commands.
-* **Automated build & registry:** GitHub Actions / GitLab CI build images and push to registry.
-* **Canary deploys:** roll new worker images to staging and run tests before production promotion.
-* **Security reviews:** regular pentests on control plane and worker images.
-
----
-
-# 8 — AI safety & infra (if you include AI)
-
-* **Prompt safety & filtering:** always run AI output through a filter that blocks system-level instructions and potential shell commands.
-* **Context limits:** only feed public or curated doc snippets to the model; do not include project files that contain private keys or passwords.
-* **Audit logs:** store prompts & responses (with user consent) for debugging and abuse detection.
-* **Rate-limits & quota:** set per-user rate limits for AI requests.
-* **Local models vs cloud:** for local/offline-first options, use small local models or private LLM deployments (e.g., Llama2, Mistral). For cloud, proxy requests via your AI Service to centralize filtering.
-
----
-
-# 9 — Phased implementation plan (ordered milestones)
-
-Phase A — **MVP (local self-hosted, minimal infra)**
-
-* Web editor (Monaco/CM) + local file saving
-* Basic CRDT collaboration (Yjs + y-websocket)
-* Compile button using a simple, single worker Docker container (no network)
-* Postgres + MinIO for files and artifacts
-* Basic auth and permissions
-* Local deploy: Docker Compose
-
-Phase B — **Stability, persistence & Git**
-
-* Persist CRDT snapshots to Postgres/Redis
-* Implement snapshot → Git commit export & import
-* Add compile job queue and worker pool
-* Add centralized logs & metrics
-
-Phase C — **Security & scaling**
-
-* Harden worker sandbox (gVisor/Kata, seccomp, AppArmor)
-* Pre-warmed worker pool and job backpressure
-* Add monitoring dashboards & alerting
-* Add role-based access and auditing
-
-Phase D — **Features & UX polish**
-
-* Real-time preview, template marketplace, version diff UI
-* VS Code extension thin client
-* Semantic search & AST diffs
-* Offline-first improvements and conflict handling
-
-Phase E — **AI & advanced features**
-
-* AI-assisted authoring (local model or proxied cloud)
-* Citation lookup, DOI auto-fill, grammar & style suggestions
-* Prompt safety and ML telemetry
-* Plugin system for diagram rendering, export pipelines, and submission automation
-
-Phase F — **Enterprise / multi-tenant**
-
-* Multi-tenant org support, quotas, SSO (SAML/OIDC), backup & DR strategy
-* HA deployment patterns & regional deployments
+```
+underleaf/
+├── backend/              # FastAPI service
+│   ├── app/
+│   │   ├── api/v1/       # Route handlers (auth, projects, compile, ...)
+│   │   ├── core/         # Config, security, database, logging
+│   │   ├── models/       # SQLAlchemy ORM models
+│   │   ├── schemas/      # Pydantic request/response schemas
+│   │   └── services/     # MinIO, RabbitMQ, Redis, email clients
+│   ├── alembic/          # Database migrations
+│   └── tests/            # pytest test suite (138 tests)
+├── frontend/             # React SPA
+│   └── src/
+│       ├── components/   # Reusable UI (FileTree, PDF viewer, AI panel, ...)
+│       ├── pages/        # Route pages (Dashboard, Editor, Profile, ...)
+│       ├── services/     # Axios API client
+│       └── stores/       # Zustand state (auth)
+├── collab-server/        # Yjs WebSocket server
+│   └── src/server.ts
+├── worker/               # LaTeX compile worker
+│   └── compile-worker.py
+├── deploy/               # Docker Compose, Dockerfiles
+└── docs/                 # Architecture, API, and roadmap docs
+```
 
 ---
 
-# 10 — Acceptance criteria for each phase (quality checklist)
+## Roadmap
 
-For each deliverable check:
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full feature roadmap and improvement plan.
 
-* Functional correctness: editor saves/loads files reliably; compilation produces PDF.
-* Security: worker cannot reach internet and cannot access host files; resource limits enforced.
-* Stability: CRDT merges cleanly after network partition; artifacts recoverable.
-* Observability: logs + metrics available and actionable.
-* Reproducibility: same project snapshot produces same PDF in CI/staging.
-
----
-
-# 11 — Suggested concrete technologies (summary)
-
-* Frontend: React + Monaco editor, Yjs for CRDT
-* Backend: FastAPI (Python) or Node.js (Express / NestJS)
-* DB: Postgres
-* Cache/presence: Redis
-* Queue: RabbitMQ or NATS
-* Object store: MinIO (S3 compatible)
-* Container runtime: Docker with gVisor/Kata (workers)
-* CI: GitHub Actions / GitLab CI
-* Monitoring: Prometheus + Grafana, Loki
-* Logging: Loki or ELK
-* CRDT server: y-websocket (or your own WebSocket server using yjs)
-* AI: local LLM runtime (for offline) or proxied API with safety filter
+**Next milestone highlights:**
+- LaTeX engine selector (pdflatex / xelatex / lualatex per project)
+- JWT refresh tokens
+- Spell check with nspell
+- New project from template
+- Snapshot / version history
 
 ---
 
-# 12 — Risks & mitigation (quick)
+## Contributing
 
-* **TeX escapes & arbitrary code:** mitigate by disabling shell-escape and strict sandboxing. Run CI escape checks for templates.
-* **CRDT merge surprises:** use well-tested Yjs and store snapshots; implement manual merge UI for conflicts.
-* **Large projects / heavy builds:** use separate node pool for heavy builds and enforce quotas.
-* **Privacy/PII in AI prompts:** strip sensitive content and require opt-in for storing prompts.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). In short:
+
+1. Fork, create a branch (`feature/<desc>` or `bugfix/<desc>`)
+2. Run `pre-commit install` after cloning
+3. Write tests for any new logic
+4. Submit a PR with a clear description and before/after screenshots for UI changes
+
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/): `feat(scope):`, `fix(scope):`, `chore(scope):`.
+
+---
+
+## License
+
+[MIT](LICENSE)
