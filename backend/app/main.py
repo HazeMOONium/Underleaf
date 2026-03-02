@@ -54,9 +54,15 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+# When allow_credentials=True, browsers reject wildcard origins per CORS spec.
+# Build a specific origin list from FRONTEND_URL + known local dev ports.
+_cors_origins = list(
+    {settings.FRONTEND_URL, "http://localhost:3000", "http://localhost:5173"}
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

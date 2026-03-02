@@ -2,10 +2,11 @@ import asyncio
 import logging
 import secrets
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, HTTPException, Response, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from datetime import timedelta
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,8 @@ from app.core.security import (
     get_password_hash,
     create_access_token,
     decode_access_token,
+    create_refresh_token,
+    decode_refresh_token,
 )
 from app.core.config import get_settings
 from app.models.models import User
@@ -140,10 +143,23 @@ async def verify_email(body: VerifyEmailRequest, db: Session = Depends(get_db)):
     return {"detail": "Email verified successfully"}
 
 
+def _set_refresh_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key="refresh_token",
+        value=token,
+        httponly=True,
+        secure=not settings.DEBUG,
+        samesite="lax",
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+        path="/api/v1/auth",
+    )
+
+
 @router.post("/login", response_model=Token)
-def login(
+async def login(
+    response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     user = db.query(User).filter(User.email == form_data.username).first()
     if not user or not verify_password(form_data.password, user.hashed_password):
@@ -151,12 +167,105 @@ def login(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password"
         )
-    
+
     access_token = create_access_token(
         subject=user.id,
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
+    refresh_token_value = create_refresh_token(subject=user.id)
+
+    # Persist refresh token in Redis so we can rotate / revoke it
+    redis_key = f"refresh_token:{refresh_token_value}"
+    try:
+        await asyncio.wait_for(
+            redis_service.set(redis_key, str(user.id), expire=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400),
+            timeout=5.0,
+        )
+    except Exception as exc:
+        logger.error("Failed to store refresh token in Redis: %s", exc)
+
+    _set_refresh_cookie(response, refresh_token_value)
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh_access_token(
+    response: Response,
+    refresh_token: Optional[str] = Cookie(default=None),
+    db: Session = Depends(get_db),
+):
+    """Issue a new short-lived access token using the refresh token cookie.
+
+    On success the old refresh token is revoked (rotation) and a new one is
+    set so the rolling 30-day window restarts.
+    """
+    if not refresh_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No refresh token")
+
+    user_id = decode_refresh_token(refresh_token)
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+
+    # Verify the token is still in Redis (not revoked)
+    redis_key = f"refresh_token:{refresh_token}"
+    try:
+        stored_user_id = await asyncio.wait_for(redis_service.get(redis_key), timeout=5.0)
+    except Exception as exc:
+        logger.error("Redis error during token refresh: %s", exc)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service unavailable")
+
+    if not stored_user_id or stored_user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token revoked")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    # Rotate: delete old token, issue new ones
+    try:
+        await asyncio.wait_for(redis_service.delete(redis_key), timeout=5.0)
+    except Exception:
+        pass
+
+    new_access_token = create_access_token(
+        subject=user.id,
+        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    new_refresh_token = create_refresh_token(subject=user.id)
+
+    try:
+        await asyncio.wait_for(
+            redis_service.set(
+                f"refresh_token:{new_refresh_token}",
+                str(user.id),
+                expire=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+            ),
+            timeout=5.0,
+        )
+    except Exception as exc:
+        logger.error("Failed to store rotated refresh token: %s", exc)
+
+    _set_refresh_cookie(response, new_refresh_token)
+    return {"access_token": new_access_token, "token_type": "bearer"}
+
+
+@router.post("/logout")
+async def logout(
+    response: Response,
+    refresh_token: Optional[str] = Cookie(default=None),
+):
+    """Revoke the refresh token and clear the cookie."""
+    if refresh_token:
+        try:
+            await asyncio.wait_for(
+                redis_service.delete(f"refresh_token:{refresh_token}"),
+                timeout=5.0,
+            )
+        except Exception:
+            pass
+
+    response.delete_cookie(key="refresh_token", path="/api/v1/auth")
+    return {"detail": "Logged out"}
 
 
 @router.get("/me", response_model=UserResponse)

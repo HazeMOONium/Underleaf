@@ -1,0 +1,10 @@
+apiVersion: 1
+
+providers:
+  - name: Underleaf
+    folder: Underleaf
+    type: file
+    disableDeletion: true
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

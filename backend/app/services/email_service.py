@@ -82,6 +82,130 @@ async def send_password_reset_email(to_email: str, reset_url: str) -> None:
     await _send_email(to_email, "Reset your Underleaf password", text_body, html_body)
 
 
+async def send_new_comment_email(
+    to_email: str,
+    project_title: str,
+    file_path: str,
+    line: int,
+    content: str,
+    commenter_email: str,
+    project_url: str,
+) -> None:
+    """Notify a project owner that someone left a new comment on their project."""
+    subject = f'New comment on "{project_title}"'
+    text_body = (
+        f'{commenter_email} commented on {file_path} (line {line}) in "{project_title}":\n\n'
+        f"  {content}\n\n"
+        f"View the project: {project_url}"
+    )
+    html_body = f"""<!DOCTYPE html>
+<html>
+<body style="font-family:sans-serif;color:#333;max-width:480px;margin:auto;padding:24px">
+  <h2 style="color:#1a7f4b">New comment on &ldquo;{project_title}&rdquo;</h2>
+  <p><strong>{commenter_email}</strong> commented on
+     <code>{file_path}</code> (line {line}):</p>
+  <blockquote style="border-left:3px solid #1a7f4b;margin:12px 0;padding:8px 16px;
+                     background:#f6fdf9;color:#555;font-style:italic">
+    {content}
+  </blockquote>
+  <p>
+    <a href="{project_url}"
+       style="display:inline-block;padding:10px 20px;background:#1a7f4b;color:#fff;
+              border-radius:6px;text-decoration:none;font-weight:600">
+      View project
+    </a>
+  </p>
+</body>
+</html>"""
+    await _send_email(to_email, subject, text_body, html_body)
+
+
+async def send_comment_reply_email(
+    to_email: str,
+    project_title: str,
+    file_path: str,
+    line: int,
+    replier_email: str,
+    reply_content: str,
+    original_content: str,
+    project_url: str,
+) -> None:
+    """Notify a comment author that someone replied to their comment."""
+    subject = f'New reply to your comment in "{project_title}"'
+    text_body = (
+        f"{replier_email} replied to your comment on {file_path} (line {line}) "
+        f'in "{project_title}":\n\n'
+        f"  Your comment: {original_content}\n\n"
+        f"  Reply: {reply_content}\n\n"
+        f"View the project: {project_url}"
+    )
+    html_body = f"""<!DOCTYPE html>
+<html>
+<body style="font-family:sans-serif;color:#333;max-width:480px;margin:auto;padding:24px">
+  <h2 style="color:#1a7f4b">New reply to your comment</h2>
+  <p><strong>{replier_email}</strong> replied to your comment on
+     <code>{file_path}</code> (line {line}) in &ldquo;{project_title}&rdquo;:</p>
+  <p style="font-size:13px;color:#888">Your comment:</p>
+  <blockquote style="border-left:3px solid #ccc;margin:4px 0 12px;padding:8px 16px;
+                     color:#888;font-style:italic">
+    {original_content}
+  </blockquote>
+  <p style="font-size:13px;color:#555">Reply:</p>
+  <blockquote style="border-left:3px solid #1a7f4b;margin:4px 0 12px;padding:8px 16px;
+                     background:#f6fdf9;color:#555;font-style:italic">
+    {reply_content}
+  </blockquote>
+  <p>
+    <a href="{project_url}"
+       style="display:inline-block;padding:10px 20px;background:#1a7f4b;color:#fff;
+              border-radius:6px;text-decoration:none;font-weight:600">
+      View project
+    </a>
+  </p>
+</body>
+</html>"""
+    await _send_email(to_email, subject, text_body, html_body)
+
+
+async def send_comment_resolved_email(
+    to_email: str,
+    project_title: str,
+    file_path: str,
+    line: int,
+    resolver_email: str,
+    comment_content: str,
+    project_url: str,
+) -> None:
+    """Notify a comment thread author that their thread was resolved."""
+    subject = f'Comment resolved in "{project_title}"'
+    text_body = (
+        f"{resolver_email} resolved a comment thread on {file_path} (line {line}) "
+        f'in "{project_title}":\n\n'
+        f"  {comment_content}\n\n"
+        f"View the project: {project_url}"
+    )
+    html_body = f"""<!DOCTYPE html>
+<html>
+<body style="font-family:sans-serif;color:#333;max-width:480px;margin:auto;padding:24px">
+  <h2 style="color:#1a7f4b">Comment resolved</h2>
+  <p><strong>{resolver_email}</strong> resolved a comment thread on
+     <code>{file_path}</code> (line {line}) in &ldquo;{project_title}&rdquo;:</p>
+  <blockquote style="border-left:3px solid #aaa;margin:12px 0;padding:8px 16px;
+                     color:#888;font-style:italic;text-decoration:line-through">
+    {comment_content}
+  </blockquote>
+  <p>
+    <a href="{project_url}"
+       style="display:inline-block;padding:10px 20px;background:#1a7f4b;color:#fff;
+              border-radius:6px;text-decoration:none;font-weight:600">
+      View project
+    </a>
+  </p>
+</body>
+</html>"""
+    await _send_email(to_email, subject, text_body, html_body)
+
+
 async def send_verification_email(to_email: str, verify_url: str) -> None:
     """Send an email-verification link to a newly registered user.
 

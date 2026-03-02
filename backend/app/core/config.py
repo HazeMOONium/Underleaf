@@ -12,7 +12,8 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/api/v1"
     SECRET_KEY: str = "change-me-in-production"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15  # short-lived access tokens
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 30  # long-lived refresh tokens (httpOnly cookie)
 
     # Database
     POSTGRES_HOST: str = "localhost"

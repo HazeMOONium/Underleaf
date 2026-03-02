@@ -2,14 +2,20 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.api.v1.auth import get_current_user
 from app.api.v1.projects import get_project_with_access, _role_gte
 from app.models.models import Comment, ProjectRole, User
 from app.schemas.collaboration import CommentCreate, CommentResponse, CommentUpdate
+from app.services.email_service import (
+    send_new_comment_email,
+    send_comment_reply_email,
+    send_comment_resolved_email,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +77,15 @@ def list_comments(
 def create_comment(
     project_id: str,
     comment_data: CommentCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _, role = get_project_with_access(project_id, current_user.id, db)
+    project, role = get_project_with_access(project_id, current_user.id, db)
     if not _role_gte(role, ProjectRole.COMMENTER):
         raise HTTPException(status_code=403, detail="Viewers cannot post comments")
 
+    parent = None
     if comment_data.parent_id:
         parent = (
             db.query(Comment)
@@ -106,6 +114,39 @@ def create_comment(
     db.commit()
     db.refresh(comment)
 
+    settings = get_settings()
+    project_url = f"{settings.FRONTEND_URL}/editor/{project_id}"
+
+    if parent is None:
+        # New top-level comment — notify project owner (unless they're the commenter)
+        owner = db.query(User).filter(User.id == project.owner_id).first()
+        if owner and owner.id != current_user.id:
+            background_tasks.add_task(
+                send_new_comment_email,
+                owner.email,
+                project.title,
+                comment_data.file_path,
+                comment_data.line,
+                comment_data.content,
+                current_user.email,
+                project_url,
+            )
+    else:
+        # Reply — notify the parent comment's author (unless they're the replier)
+        parent_author = db.query(User).filter(User.id == parent.author_id).first()
+        if parent_author and parent_author.id != current_user.id:
+            background_tasks.add_task(
+                send_comment_reply_email,
+                parent_author.email,
+                project.title,
+                comment_data.file_path,
+                comment_data.line,
+                current_user.email,
+                comment_data.content,
+                parent.content,
+                project_url,
+            )
+
     return CommentResponse(
         id=comment.id,
         project_id=comment.project_id,
@@ -126,10 +167,11 @@ def update_comment(
     project_id: str,
     comment_id: str,
     update: CommentUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _, role = get_project_with_access(project_id, current_user.id, db)
+    project, role = get_project_with_access(project_id, current_user.id, db)
 
     comment = (
         db.query(Comment)
@@ -144,17 +186,42 @@ def update_comment(
             raise HTTPException(status_code=403, detail="Can only edit your own comments")
         comment.content = update.content
 
+    was_resolved = False
     if update.resolved is not None:
         is_privileged = role in (ProjectRole.OWNER, ProjectRole.EDITOR)
         if not is_privileged and comment.author_id != current_user.id:
             raise HTTPException(
                 status_code=403, detail="Insufficient permissions to resolve comment"
             )
+        if update.resolved and comment.resolved_at is None:
+            was_resolved = True
         comment.resolved_at = datetime.now(timezone.utc) if update.resolved else None
 
     db.commit()
     db.refresh(comment)
     author = db.query(User).filter(User.id == comment.author_id).first()
+
+    # Notify thread author when their comment is resolved (unless they did it)
+    if was_resolved and author and author.id != current_user.id:
+        settings = get_settings()
+        project_url = f"{settings.FRONTEND_URL}/editor/{project_id}"
+        # Resolve notifications go to the root comment's author
+        root_comment = comment if comment.parent_id is None else (
+            db.query(Comment).filter(Comment.id == comment.parent_id).first() or comment
+        )
+        root_author = db.query(User).filter(User.id == root_comment.author_id).first()
+        if root_author and root_author.id != current_user.id:
+            background_tasks.add_task(
+                send_comment_resolved_email,
+                root_author.email,
+                project.title,
+                root_comment.file_path,
+                root_comment.line,
+                current_user.email,
+                root_comment.content,
+                project_url,
+            )
+
     return _build_response(comment, author, db)
 
 

@@ -3,6 +3,7 @@ import type { User, Project, ProjectFile, CompileJob, Token, Member, ProjectInvi
 
 const api = axios.create({
   baseURL: '/api/v1',
+  withCredentials: true, // send httpOnly refresh_token cookie on every request
 })
 
 api.interceptors.request.use((config) => {
@@ -12,6 +13,58 @@ api.interceptors.request.use((config) => {
   }
   return config
 })
+
+// Silent token refresh — on 401 attempt one refresh, then retry
+let _isRefreshing = false
+let _refreshQueue: Array<(token: string) => void> = []
+
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const original = error.config
+    // Skip retry for auth endpoints and already-retried requests
+    if (
+      error.response?.status !== 401 ||
+      original._retry ||
+      original.url?.includes('/auth/')
+    ) {
+      return Promise.reject(error)
+    }
+
+    original._retry = true
+
+    if (_isRefreshing) {
+      // Queue this request until the ongoing refresh completes
+      return new Promise((resolve) => {
+        _refreshQueue.push((newToken) => {
+          original.headers.Authorization = `Bearer ${newToken}`
+          resolve(api(original))
+        })
+      })
+    }
+
+    _isRefreshing = true
+    try {
+      const { data } = await api.post<Token>('/auth/refresh')
+      const newToken = data.access_token
+      localStorage.setItem('token', newToken)
+
+      _refreshQueue.forEach((cb) => cb(newToken))
+      _refreshQueue = []
+
+      original.headers.Authorization = `Bearer ${newToken}`
+      return api(original)
+    } catch {
+      // Refresh failed — clear local state and redirect to login
+      localStorage.removeItem('token')
+      _refreshQueue = []
+      window.location.href = '/login'
+      return Promise.reject(error)
+    } finally {
+      _isRefreshing = false
+    }
+  },
+)
 
 export const authApi = {
   register: (email: string, password: string) =>
@@ -39,6 +92,10 @@ export const authApi = {
 
   verifyEmail: (token: string) =>
     api.post('/auth/verify-email', { token }),
+
+  refresh: () => api.post<Token>('/auth/refresh'),
+
+  logout: () => api.post('/auth/logout'),
 }
 
 export const projectsApi = {
