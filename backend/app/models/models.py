@@ -66,6 +66,7 @@ class Project(Base):
     compile_jobs = relationship("CompileJob", back_populates="project", cascade="all, delete-orphan")
     invites = relationship("ProjectInvite", back_populates="project", cascade="all, delete-orphan")
     comments = relationship("Comment", back_populates="project", cascade="all, delete-orphan")
+    snapshots = relationship("Snapshot", back_populates="project", cascade="all, delete-orphan")
 
 
 class ProjectFile(Base):
@@ -158,3 +159,20 @@ class CompileJob(Base):
     finished_at = Column(DateTime, nullable=True)
 
     project = relationship("Project", back_populates="compile_jobs")
+    snapshot = relationship("Snapshot", back_populates="compile_job", uselist=False)
+
+
+class Snapshot(Base):
+    __tablename__ = "snapshots"
+    __table_args__ = (
+        UniqueConstraint("compile_job_id", name="uq_snapshot_compile_job"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String, ForeignKey("projects.id"), nullable=False)
+    compile_job_id = Column(String, ForeignKey("compile_jobs.id"), nullable=False)
+    label = Column(String, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    project = relationship("Project", back_populates="snapshots")
+    compile_job = relationship("CompileJob", back_populates="snapshot")

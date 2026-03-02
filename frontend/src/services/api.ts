@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { User, Project, ProjectFile, CompileJob, Token, Member, ProjectInvite, InvitePreview, Comment } from '../types'
+import type { User, Project, ProjectFile, CompileJob, Snapshot, Token, Member, ProjectInvite, InvitePreview, Comment } from '../types'
 
 const api = axios.create({
   baseURL: '/api/v1',
@@ -187,6 +187,20 @@ export const invitesApi = {
 
   accept: (token: string) =>
     api.post<Member>(`/invites/${token}/accept`),
+}
+
+export const snapshotsApi = {
+  list: (projectId: string) =>
+    api.get<Snapshot[]>(`/projects/${projectId}/snapshots`),
+
+  getArtifact: (projectId: string, snapshotId: string) =>
+    api.get(`/projects/${projectId}/snapshots/${snapshotId}/artifact`, { responseType: 'blob' }),
+
+  updateLabel: (projectId: string, snapshotId: string, label: string) =>
+    api.patch<Snapshot>(`/projects/${projectId}/snapshots/${snapshotId}`, { label }),
+
+  delete: (projectId: string, snapshotId: string) =>
+    api.delete(`/projects/${projectId}/snapshots/${snapshotId}`),
 }
 
 export const commentsApi = {

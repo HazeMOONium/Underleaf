@@ -8,8 +8,9 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.api.v1.auth import get_current_user
 from app.api.v1.projects import get_project_with_access
-from app.models.models import CompileJob, JobStatus, ProjectFile, ProjectRole, User
+from app.models.models import CompileJob, JobStatus, ProjectFile, ProjectRole, Snapshot, User
 from app.schemas.compile import CompileJobCreate, CompileJobResponse
+from app.schemas.snapshot import SnapshotResponse, SnapshotUpdate
 from app.services.minio_service import minio_service
 from app.services.rabbitmq_service import rabbitmq_service, COMPILE_JOBS_QUEUE
 from app.services.redis_service import redis_service
@@ -98,9 +99,21 @@ def get_job_status(
     job = db.query(CompileJob).filter(CompileJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     get_project_with_access(job.project_id, current_user.id, db)  # type: ignore[misc]
-    
+
+    # Auto-create a Snapshot the first time we see a completed job with an artifact.
+    # The unique constraint on compile_job_id makes this idempotent.
+    if job.status == JobStatus.COMPLETED and job.artifact_ref:
+        exists = db.query(Snapshot).filter(Snapshot.compile_job_id == job.id).first()
+        if not exists:
+            snapshot = Snapshot(project_id=job.project_id, compile_job_id=job.id)
+            db.add(snapshot)
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+
     return {
         "id": job.id,
         "status": job.status.value,
@@ -222,3 +235,104 @@ def get_job_logs(
     except Exception as e:
         logger.error(f"Failed to download logs for job {job_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve logs")
+
+
+# ── Snapshots router ──────────────────────────────────────────────────────────
+# Mounted at /projects/{project_id}/snapshots in main.py
+
+snapshots_router = APIRouter(prefix="/projects", tags=["snapshots"])
+
+
+def _snapshot_to_response(snap: Snapshot) -> dict:
+    return {
+        "id": snap.id,
+        "project_id": snap.project_id,
+        "compile_job_id": snap.compile_job_id,
+        "label": snap.label,
+        "artifact_ref": snap.compile_job.artifact_ref if snap.compile_job else None,
+        "created_at": snap.created_at,
+    }
+
+
+@snapshots_router.get("/{project_id}/snapshots", response_model=list[SnapshotResponse])
+def list_snapshots(
+    project_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    get_project_with_access(project_id, current_user.id, db)  # type: ignore[misc]
+    snaps = (
+        db.query(Snapshot)
+        .filter(Snapshot.project_id == project_id)
+        .order_by(Snapshot.created_at.desc())
+        .all()
+    )
+    return [_snapshot_to_response(s) for s in snaps]
+
+
+@snapshots_router.get("/{project_id}/snapshots/{snapshot_id}/artifact")
+def get_snapshot_artifact(
+    project_id: str,
+    snapshot_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    get_project_with_access(project_id, current_user.id, db)  # type: ignore[misc]
+    snap = db.query(Snapshot).filter(
+        Snapshot.id == snapshot_id, Snapshot.project_id == project_id
+    ).first()
+    if not snap:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    artifact_ref = snap.compile_job.artifact_ref if snap.compile_job else None
+    if not artifact_ref:
+        raise HTTPException(status_code=404, detail="No artifact for this snapshot")
+    try:
+        from io import BytesIO
+        bucket = minio_service._default_bucket
+        pdf_bytes = minio_service.download_file(bucket, artifact_ref)
+        return StreamingResponse(
+            BytesIO(pdf_bytes),
+            media_type="application/pdf",
+            headers={"Content-Disposition": "inline; filename=snapshot.pdf"},
+        )
+    except Exception as e:
+        logger.error(f"Failed to download snapshot artifact {snapshot_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve artifact")
+
+
+@snapshots_router.patch("/{project_id}/snapshots/{snapshot_id}", response_model=SnapshotResponse)
+def update_snapshot(
+    project_id: str,
+    snapshot_id: str,
+    patch: SnapshotUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    get_project_with_access(project_id, current_user.id, db, minimum_role=ProjectRole.EDITOR)  # type: ignore[misc]
+    snap = db.query(Snapshot).filter(
+        Snapshot.id == snapshot_id, Snapshot.project_id == project_id
+    ).first()
+    if not snap:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    if patch.label is not None:
+        snap.label = patch.label
+    db.commit()
+    db.refresh(snap)
+    return _snapshot_to_response(snap)
+
+
+@snapshots_router.delete("/{project_id}/snapshots/{snapshot_id}", status_code=204)
+def delete_snapshot(
+    project_id: str,
+    snapshot_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    get_project_with_access(project_id, current_user.id, db, minimum_role=ProjectRole.EDITOR)  # type: ignore[misc]
+    snap = db.query(Snapshot).filter(
+        Snapshot.id == snapshot_id, Snapshot.project_id == project_id
+    ).first()
+    if not snap:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    db.delete(snap)
+    db.commit()

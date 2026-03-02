@@ -37,6 +37,15 @@ export interface CompileJob {
   finished_at: string | null
 }
 
+export interface Snapshot {
+  id: string
+  project_id: string
+  compile_job_id: string
+  label: string | null
+  artifact_ref: string | null
+  created_at: string
+}
+
 export interface Token {
   access_token: string
   token_type: string

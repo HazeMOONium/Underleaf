@@ -71,16 +71,17 @@ Emacs mode uses `monaco-emacs`.
 
 ## Collaboration
 
-### Snapshot / version history
+### ~~Snapshot / version history~~ ✅ Done
 
-Track a history of compile events as "snapshots":
-
-- Each successful compile creates a `Snapshot` record pointing to the compiled PDF
-- Version history panel in the editor shows a timeline
-- Click a snapshot → view the PDF from that point in time
-- "Restore" button re-uploads the snapshot's files as the current version
-- **Backend**: new `Snapshot` model + API endpoints
-- **Effort**: L (6–8h)
+Each successful compile auto-creates a `Snapshot` record:
+- `Snapshot` model with unique constraint on `compile_job_id` (idempotent creation)
+- Auto-created in `GET /jobs/:id/status` when status transitions to COMPLETED
+- `GET /projects/:id/snapshots` — list in reverse-chronological order
+- `GET /projects/:id/snapshots/:id/artifact` — stream historical PDF
+- `PATCH /projects/:id/snapshots/:id` — rename label (editor role)
+- `DELETE /projects/:id/snapshots/:id` — delete (editor role)
+- History tab in editor output panel: timeline list, View PDF (opens in PDF pane with banner), download, rename (inline click-to-edit), delete
+- Migration 005 with `uq_snapshot_compile_job` unique constraint
 
 ### ~~Comment notification emails~~ ✅ Done
 
@@ -271,3 +272,4 @@ For reference, major features already shipped:
 - **Presence overflow badge** — `+N` avatar badge when >3 collaborators online
 - **Structured JSON logging** — all request fields as top-level JSON keys (`method`, `path`, `status`, `duration`)
 - **SQLAlchemy connection pool** — `pool_size=10`, `max_overflow=20`, `pool_timeout=30`
+- **Snapshot / version history** — auto-created per compile, History tab in editor with View PDF, download, rename, delete

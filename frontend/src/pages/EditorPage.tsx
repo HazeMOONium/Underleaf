@@ -12,7 +12,7 @@ import { EmacsExtension } from 'monaco-emacs'
 import * as Y from 'yjs'
 import { WebsocketProvider } from 'y-websocket'
 import { MonacoBinding } from 'y-monaco'
-import { projectsApi, compileApi, commentsApi } from '../services/api'
+import { projectsApi, compileApi, commentsApi, snapshotsApi } from '../services/api'
 import { useAuthStore } from '../stores/auth'
 import { useProjectRole } from '../hooks/useProjectRole'
 import FileTree from '../components/FileTree'
@@ -152,7 +152,10 @@ export default function EditorPage() {
   const [compileDuration, setCompileDuration] = useState<number | null>(null)
   const [lastJobId, setLastJobId] = useState<string | null>(null)
   const compileStartRef = useRef<number>(0)
-  const [previewTab, setPreviewTab] = useState<'pdf' | 'logs' | 'files'>('pdf')
+  const [previewTab, setPreviewTab] = useState<'pdf' | 'logs' | 'files' | 'history'>('pdf')
+  const [historyPdfUrl, setHistoryPdfUrl] = useState<string | null>(null)
+  const [editingLabelId, setEditingLabelId] = useState<string | null>(null)
+  const [editingLabelText, setEditingLabelText] = useState('')
   const [connectedUsers, setConnectedUsers] = useState<AwarenessUser[]>([])
   const [showAIPanel, setShowAIPanel] = useState(false)
   const [selectedText, setSelectedText] = useState('')
@@ -235,6 +238,7 @@ export default function EditorPage() {
     return () => {
       mountedRef.current = false
       if (pdfUrl) URL.revokeObjectURL(pdfUrl)
+      if (historyPdfUrl) URL.revokeObjectURL(historyPdfUrl)
       if (latexDiagnosticsCleanupRef.current) latexDiagnosticsCleanupRef.current()
     }
   }, [])
@@ -260,6 +264,12 @@ export default function EditorPage() {
   const { data: files } = useQuery({
     queryKey: ['files', projectId],
     queryFn: () => projectsApi.listFiles(projectId!).then((res) => res.data),
+    enabled: !!projectId && myRole !== false,
+  })
+
+  const { data: snapshots = [] } = useQuery({
+    queryKey: ['snapshots', projectId],
+    queryFn: () => snapshotsApi.list(projectId!).then((res) => res.data),
     enabled: !!projectId && myRole !== false,
   })
 
@@ -685,6 +695,10 @@ export default function EditorPage() {
           const elapsed = (Date.now() - compileStartRef.current) / 1000
           setCompileDuration(elapsed)
           toast.success(`Compiled in ${elapsed.toFixed(1)}s`)
+          // Refresh snapshot list after a short delay to allow auto-creation
+          setTimeout(() => {
+            queryClient.invalidateQueries({ queryKey: ['snapshots', projectId] })
+          }, 1500)
           // Fetch PDF
           try {
             const res = await compileApi.getArtifact(jobId)
@@ -1658,7 +1672,7 @@ export default function EditorPage() {
           {/* Tab bar */}
           <div style={styles.previewHeader}>
             <div style={styles.tabBar}>
-              {(['pdf', 'logs', 'files'] as const).map((tab) => (
+              {(['pdf', 'logs', 'files', 'history'] as const).map((tab) => (
                 <button
                   key={tab}
                   style={{
@@ -1667,7 +1681,7 @@ export default function EditorPage() {
                   }}
                   onClick={() => setPreviewTab(tab)}
                 >
-                  {tab === 'pdf' ? 'PDF' : tab === 'logs' ? 'Logs' : 'Files'}
+                  {tab === 'pdf' ? 'PDF' : tab === 'logs' ? 'Logs' : tab === 'files' ? 'Files' : 'History'}
                   {tab === 'logs' && compileLogs && (logErrorCount > 0 || logWarningCount > 0) && (
                     <span style={styles.logsBadge}>
                       {logErrorCount > 0 && (
@@ -1680,6 +1694,11 @@ export default function EditorPage() {
                   )}
                   {tab === 'logs' && compileError && logErrorCount === 0 && logWarningCount === 0 && (
                     <span style={styles.tabErrorDot} />
+                  )}
+                  {tab === 'history' && snapshots.length > 0 && (
+                    <span style={{ marginLeft: 4, opacity: 0.6, fontSize: '10px' }}>
+                      {snapshots.length}
+                    </span>
                   )}
                 </button>
               ))}
@@ -1726,6 +1745,32 @@ export default function EditorPage() {
                 <div style={styles.previewEmpty}>
                   <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin" style={{ marginBottom: '12px', color: 'var(--color-brand)' }}><circle cx="12" cy="12" r="10" strokeOpacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/></svg>
                   <p style={styles.previewEmptyText}>Compiling…</p>
+                </div>
+              ) : historyPdfUrl ? (
+                <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                  <div style={{
+                    padding: '6px 10px',
+                    background: 'rgba(26,127,75,0.12)',
+                    borderBottom: '1px solid var(--color-border)',
+                    fontSize: '11px',
+                    color: 'var(--color-brand)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexShrink: 0,
+                  }}>
+                    <span>Historical build</span>
+                    <button
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', fontSize: '11px', padding: 0 }}
+                      onClick={() => {
+                        URL.revokeObjectURL(historyPdfUrl)
+                        setHistoryPdfUrl(null)
+                      }}
+                    >
+                      ✕ Back to current
+                    </button>
+                  </div>
+                  <PDFViewer url={historyPdfUrl} />
                 </div>
               ) : pdfUrl ? (
                 <PDFViewer
@@ -1840,6 +1885,178 @@ export default function EditorPage() {
                   )}
                 </div>
               )
+            )}
+
+            {/* ── History tab ── */}
+            {previewTab === 'history' && (
+              <div style={styles.filesList}>
+                {historyPdfUrl && (
+                  <div style={{
+                    padding: '8px 10px',
+                    background: 'rgba(26,127,75,0.12)',
+                    borderBottom: '1px solid var(--color-border)',
+                    fontSize: '11px',
+                    color: 'var(--color-brand)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '8px',
+                  }}>
+                    <span>Viewing historical build</span>
+                    <button
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', fontSize: '11px', padding: 0 }}
+                      onClick={() => {
+                        URL.revokeObjectURL(historyPdfUrl)
+                        setHistoryPdfUrl(null)
+                        setPreviewTab('pdf')
+                      }}
+                    >
+                      ✕ Back to current
+                    </button>
+                  </div>
+                )}
+                {snapshots.length === 0 ? (
+                  <div style={styles.previewEmpty}>
+                    <p style={styles.previewEmptyText}>
+                      No snapshots yet. Each successful compile creates one automatically.
+                    </p>
+                  </div>
+                ) : (
+                  snapshots.map((snap) => {
+                    const date = new Date(snap.created_at)
+                    const dateStr = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+                    const timeStr = date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+                    const isEditing = editingLabelId === snap.id
+                    return (
+                      <div key={snap.id} style={{
+                        ...styles.fileItem,
+                        flexDirection: 'column',
+                        alignItems: 'stretch',
+                        gap: '6px',
+                        padding: '8px 10px',
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span style={styles.fileItemIcon}>📸</span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            {isEditing ? (
+                              <input
+                                autoFocus
+                                value={editingLabelText}
+                                onChange={(e) => setEditingLabelText(e.target.value)}
+                                onBlur={async () => {
+                                  if (editingLabelText.trim() !== (snap.label ?? '')) {
+                                    try {
+                                      await snapshotsApi.updateLabel(projectId!, snap.id, editingLabelText.trim())
+                                      queryClient.invalidateQueries({ queryKey: ['snapshots', projectId] })
+                                    } catch {
+                                      toast.error('Failed to update label')
+                                    }
+                                  }
+                                  setEditingLabelId(null)
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                                  if (e.key === 'Escape') setEditingLabelId(null)
+                                }}
+                                style={{
+                                  width: '100%',
+                                  background: 'var(--color-input-bg)',
+                                  border: '1px solid var(--color-border)',
+                                  borderRadius: '4px',
+                                  color: 'var(--color-text)',
+                                  fontSize: '12px',
+                                  padding: '2px 6px',
+                                  outline: 'none',
+                                }}
+                              />
+                            ) : (
+                              <div
+                                style={{ fontSize: '12px', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: editorRole ? 'text' : 'default', color: 'var(--color-text)' }}
+                                title={editorRole ? 'Click to rename' : undefined}
+                                onClick={() => {
+                                  if (!editorRole) return
+                                  setEditingLabelId(snap.id)
+                                  setEditingLabelText(snap.label ?? '')
+                                }}
+                              >
+                                {snap.label || <span style={{ opacity: 0.45 }}>{dateStr} {timeStr}</span>}
+                              </div>
+                            )}
+                            {snap.label && (
+                              <div style={{ fontSize: '10px', opacity: 0.5 }}>{dateStr} {timeStr}</div>
+                            )}
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', gap: '4px', justifyContent: 'flex-end' }}>
+                          {snap.artifact_ref && (
+                            <>
+                              <button
+                                style={{ fontSize: '11px', padding: '3px 8px', background: 'var(--color-brand)', border: 'none', borderRadius: '4px', color: '#fff', cursor: 'pointer' }}
+                                onClick={async () => {
+                                  try {
+                                    const res = await snapshotsApi.getArtifact(projectId!, snap.id)
+                                    const blob = new Blob([res.data], { type: 'application/pdf' })
+                                    const url = URL.createObjectURL(blob)
+                                    setHistoryPdfUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url })
+                                    setPreviewTab('pdf')
+                                  } catch {
+                                    toast.error('Failed to load historical PDF')
+                                  }
+                                }}
+                              >
+                                View PDF
+                              </button>
+                              <a
+                                href="#"
+                                style={{ fontSize: '11px', padding: '3px 8px', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '4px', color: '#aaa', cursor: 'pointer', textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
+                                onClick={async (e) => {
+                                  e.preventDefault()
+                                  try {
+                                    const res = await snapshotsApi.getArtifact(projectId!, snap.id)
+                                    const blob = new Blob([res.data], { type: 'application/pdf' })
+                                    const url = URL.createObjectURL(blob)
+                                    const a = document.createElement('a')
+                                    a.href = url
+                                    a.download = `${snap.label || dateStr}.pdf`
+                                    a.click()
+                                    URL.revokeObjectURL(url)
+                                  } catch {
+                                    toast.error('Failed to download')
+                                  }
+                                }}
+                              >
+                                ↓
+                              </a>
+                            </>
+                          )}
+                          {editorRole && (
+                            <button
+                              style={{ fontSize: '11px', padding: '3px 6px', background: 'none', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '4px', color: '#888', cursor: 'pointer' }}
+                              title="Delete snapshot"
+                              onClick={async () => {
+                                if (!confirm('Delete this snapshot?')) return
+                                try {
+                                  await snapshotsApi.delete(projectId!, snap.id)
+                                  queryClient.invalidateQueries({ queryKey: ['snapshots', projectId] })
+                                  toast.success('Snapshot deleted')
+                                  if (historyPdfUrl) {
+                                    URL.revokeObjectURL(historyPdfUrl)
+                                    setHistoryPdfUrl(null)
+                                  }
+                                } catch {
+                                  toast.error('Failed to delete snapshot')
+                                }
+                              }}
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })
+                )}
+              </div>
             )}
 
             {/* ── Files tab ── */}
