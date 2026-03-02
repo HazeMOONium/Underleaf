@@ -35,14 +35,14 @@ High value, low effort items that can be shipped quickly.
 
 ## Editor improvements
 
-### Spell check
+### ~~Spell check~~ ✅ Done
 
-Integrate `nspell` (hunspell-compatible JS) for English spell checking in Monaco.
-
-- Register a Monaco `setModelMarkers` provider that runs nspell on the text content of each LaTeX paragraph (ignoring commands, math, and environments)
-- Show squiggle underlines + hover suggestions
-- Language selector (en-US / en-GB / de / fr / es) stored in user profile
-- **Effort**: M (3–4h)
+`nspell` (hunspell-compatible JS) in a Web Worker for non-blocking spell checking:
+- `latexTextExtractor.ts` — strips comments, math ($, $$, environments), LaTeX commands; tokenizes remaining prose words with column offsets
+- `spellCheckWorker.ts` — Web Worker: fetches `.aff`/`.dic` from `/public/dictionaries/`, creates nspell instance, checks words, returns markers + suggestions
+- `spellChecker.ts` — main-thread orchestrator: 700ms debounce, `setModelMarkers` (OWNER `spell-check`), CodeActionProvider with replacement suggestions + "Ignore word" quick-fix
+- Status bar toggle (checkbox + locale selector): en-US / en-GB; settings persisted in localStorage
+- Dictionary files: `frontend/public/dictionaries/en-us.{aff,dic}` + `en-gb.{aff,dic}` (copied from `dictionary-en`, `dictionary-en-gb` npm packages)
 
 ### ~~Enhanced LaTeX diagnostics~~ ✅ Done
 
@@ -273,3 +273,4 @@ For reference, major features already shipped:
 - **Structured JSON logging** — all request fields as top-level JSON keys (`method`, `path`, `status`, `duration`)
 - **SQLAlchemy connection pool** — `pool_size=10`, `max_overflow=20`, `pool_timeout=30`
 - **Snapshot / version history** — auto-created per compile, History tab in editor with View PDF, download, rename, delete
+- **Spell check** — nspell Web Worker, en-US/en-GB dictionaries, LaTeX-aware text extractor, quick-fix suggestions + ignore, status-bar toggle

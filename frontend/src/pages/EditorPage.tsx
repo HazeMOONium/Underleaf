@@ -178,6 +178,16 @@ export default function EditorPage() {
     () => (localStorage.getItem('keybindingMode') as KeybindingMode | null) ?? 'normal',
   )
 
+  // Spell check
+  type SpellLocale = 'en-us' | 'en-gb'
+  const [spellEnabled, setSpellEnabled] = useState<boolean>(
+    () => localStorage.getItem('spellCheckEnabled') !== 'false',
+  )
+  const [spellLocale, setSpellLocale] = useState<SpellLocale>(
+    () => (localStorage.getItem('spellCheckLocale') as SpellLocale | null) ?? 'en-us',
+  )
+  const spellCheckerRef = useRef<{ cleanup: () => void; setLocale: (l: SpellLocale) => void } | null>(null)
+
   // Project-wide search panel
   interface SearchResult { file: string; line: number; col: number; preview: string }
   const [showSearchPanel, setShowSearchPanel] = useState(false)
@@ -240,6 +250,7 @@ export default function EditorPage() {
       if (pdfUrl) URL.revokeObjectURL(pdfUrl)
       if (historyPdfUrl) URL.revokeObjectURL(historyPdfUrl)
       if (latexDiagnosticsCleanupRef.current) latexDiagnosticsCleanupRef.current()
+      spellCheckerRef.current?.cleanup()
     }
   }, [])
 
@@ -947,6 +958,15 @@ export default function EditorPage() {
     }
     latexDiagnosticsCleanupRef.current = registerLatexDiagnostics(monaco, editor)
 
+    // Spell checker — only for .tex files, loaded lazily
+    spellCheckerRef.current?.cleanup()
+    spellCheckerRef.current = null
+    if (spellEnabled) {
+      import('../editor/spellChecker').then(({ registerSpellChecker }) => {
+        spellCheckerRef.current = registerSpellChecker(monaco, editor, spellLocale)
+      })
+    }
+
     // Track cursor/selection for AI panel and awareness broadcasting
     const broadcastPosition = () => {
       const provider = providerRef.current
@@ -1157,6 +1177,12 @@ export default function EditorPage() {
 
   // Memoized outline
   const outlineContent = useMemo(() => content, [content])
+
+  // ── Spell check — locale changes ─────────────────────────────────────────
+  useEffect(() => {
+    localStorage.setItem('spellCheckLocale', spellLocale)
+    spellCheckerRef.current?.setLocale(spellLocale)
+  }, [spellLocale])
 
   // ── Keybinding mode — vim / emacs / normal ────────────────────────────────
   useEffect(() => {
@@ -1646,8 +1672,52 @@ export default function EditorPage() {
           }}>
             {/* vim status bar target — monaco-vim renders mode text here */}
             <div ref={vimStatusBarRef} style={{ color: 'rgba(255,255,255,0.7)', minWidth: 60 }} />
-            <div style={{ display: 'flex', gap: '16px', marginLeft: 'auto' }}>
+            <div style={{ display: 'flex', gap: '12px', marginLeft: 'auto', alignItems: 'center' }}>
               <span style={{ opacity: 0.3 }}>Ctrl+Shift+F to search</span>
+              {/* Spell check controls */}
+              <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer', userSelect: 'none' }}>
+                <input
+                  type="checkbox"
+                  checked={spellEnabled}
+                  onChange={(e) => {
+                    const enabled = e.target.checked
+                    localStorage.setItem('spellCheckEnabled', String(enabled))
+                    setSpellEnabled(enabled)
+                    if (!enabled) {
+                      spellCheckerRef.current?.cleanup()
+                      spellCheckerRef.current = null
+                    } else if (editorRef.current) {
+                      const monacoInst = (window as any).monaco
+                      if (monacoInst) {
+                        import('../editor/spellChecker').then(({ registerSpellChecker }) => {
+                          spellCheckerRef.current = registerSpellChecker(monacoInst, editorRef.current!, spellLocale)
+                        })
+                      }
+                    }
+                  }}
+                  style={{ accentColor: 'var(--color-brand)', cursor: 'pointer', width: 11, height: 11 }}
+                />
+                Spell
+              </label>
+              {spellEnabled && (
+                <select
+                  value={spellLocale}
+                  onChange={(e) => setSpellLocale(e.target.value as SpellLocale)}
+                  title="Spell check language"
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'rgba(255,255,255,0.45)',
+                    fontSize: '11px',
+                    cursor: 'pointer',
+                    outline: 'none',
+                    fontFamily: 'var(--font-mono)',
+                  }}
+                >
+                  <option value="en-us">en-US</option>
+                  <option value="en-gb">en-GB</option>
+                </select>
+              )}
               <span>{wordCount.toLocaleString()} words</span>
               <span>{charCount.toLocaleString()} chars</span>
             </div>
