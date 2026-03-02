@@ -2,15 +2,29 @@ import { create } from 'zustand'
 import { authApi } from '../services/api'
 import type { User } from '../types'
 
+export interface TwoFAChallenge {
+  requires2FA: true
+  sessionToken: string
+}
+
 interface AuthState {
   user: User | null
   token: string | null
   loading: boolean
+  /** Resolves normally on success; throws TwoFAChallenge if 2FA is required. */
   login: (email: string, password: string) => Promise<void>
+  completeTotpLogin: (sessionToken: string, code: string) => Promise<void>
   register: (email: string, password: string) => Promise<void>
   logout: () => void
   fetchUser: () => Promise<void>
   setToken: (token: string) => void
+}
+
+async function _storeToken(token: string, set: (s: Partial<AuthState>) => void) {
+  localStorage.setItem('token', token)
+  set({ token })
+  const { data } = await authApi.me()
+  set({ user: data })
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -22,9 +36,21 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ loading: true })
     try {
       const { data } = await authApi.login(email, password)
-      localStorage.setItem('token', data.access_token)
-      set({ token: data.access_token })
-      await authApi.me().then((res) => set({ user: res.data }))
+      if (data.requires_2fa && data.session_token) {
+        const challenge: TwoFAChallenge = { requires2FA: true, sessionToken: data.session_token }
+        throw challenge
+      }
+      await _storeToken(data.access_token!, set)
+    } finally {
+      set({ loading: false })
+    }
+  },
+
+  completeTotpLogin: async (sessionToken: string, code: string) => {
+    set({ loading: true })
+    try {
+      const { data } = await authApi.totpLogin(sessionToken, code)
+      await _storeToken(data.access_token!, set)
     } finally {
       set({ loading: false })
     }
@@ -34,11 +60,8 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ loading: true })
     try {
       await authApi.register(email, password)
-      await authApi.login(email, password).then((res) => {
-        localStorage.setItem('token', res.data.access_token)
-        set({ token: res.data.access_token })
-      })
-      await authApi.me().then((res) => set({ user: res.data }))
+      const { data } = await authApi.login(email, password)
+      await _storeToken(data.access_token!, set)
     } finally {
       set({ loading: false })
     }

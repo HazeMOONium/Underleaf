@@ -21,6 +21,7 @@ from app.core.security import (
 )
 from app.core.config import get_settings
 from app.models.models import User
+from app.models.models import TotpBackupCode
 from app.schemas.user import (
     UserCreate,
     UserResponse,
@@ -29,6 +30,12 @@ from app.schemas.user import (
     ResetPasswordRequest,
     ChangePasswordRequest,
     VerifyEmailRequest,
+    TotpEnableResponse,
+    TotpVerifyRequest,
+    TotpVerifyResponse,
+    TotpDisableRequest,
+    TotpLoginRequest,
+    LoginResponse,
 )
 from app.services.redis_service import redis_service
 from app.services.email_service import send_password_reset_email, send_verification_email
@@ -155,7 +162,29 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
     )
 
 
-@router.post("/login", response_model=Token)
+async def _issue_tokens(response: Response, user_id: str) -> LoginResponse:
+    """Create an access + refresh token pair and set the refresh cookie."""
+    access_token = create_access_token(
+        subject=user_id,
+        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    refresh_token_value = create_refresh_token(subject=user_id)
+    try:
+        await asyncio.wait_for(
+            redis_service.set(
+                f"refresh_token:{refresh_token_value}",
+                str(user_id),
+                expire=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+            ),
+            timeout=5.0,
+        )
+    except Exception as exc:
+        logger.error("Failed to store refresh token in Redis: %s", exc)
+    _set_refresh_cookie(response, refresh_token_value)
+    return LoginResponse(access_token=access_token)
+
+
+@router.post("/login", response_model=LoginResponse)
 async def login(
     response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(),
@@ -168,24 +197,20 @@ async def login(
             detail="Incorrect email or password"
         )
 
-    access_token = create_access_token(
-        subject=user.id,
-        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
-    refresh_token_value = create_refresh_token(subject=user.id)
+    # If 2FA is enabled, return a short-lived session token — no access token yet
+    if user.totp_enabled:
+        session_token = secrets.token_urlsafe(32)
+        try:
+            await asyncio.wait_for(
+                redis_service.set(f"2fa_session:{session_token}", str(user.id), expire=300),
+                timeout=5.0,
+            )
+        except Exception as exc:
+            logger.error("Failed to store 2FA session token: %s", exc)
+            raise HTTPException(status_code=503, detail="Service unavailable")
+        return LoginResponse(requires_2fa=True, session_token=session_token)
 
-    # Persist refresh token in Redis so we can rotate / revoke it
-    redis_key = f"refresh_token:{refresh_token_value}"
-    try:
-        await asyncio.wait_for(
-            redis_service.set(redis_key, str(user.id), expire=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400),
-            timeout=5.0,
-        )
-    except Exception as exc:
-        logger.error("Failed to store refresh token in Redis: %s", exc)
-
-    _set_refresh_cookie(response, refresh_token_value)
-    return {"access_token": access_token, "token_type": "bearer"}
+    return await _issue_tokens(response, user.id)
 
 
 @router.post("/refresh", response_model=Token)
@@ -352,3 +377,113 @@ async def reset_password(body: ResetPasswordRequest, db: Session = Depends(get_d
         pass  # token expiry handles cleanup
 
     return {"detail": "Password updated successfully"}
+
+
+# ── Two-Factor Authentication (TOTP) ────────────────────────────────────────
+
+@router.post("/2fa/enable", response_model=TotpEnableResponse)
+def totp_enable(current_user: User = Depends(get_current_user)):
+    """Generate a new TOTP secret and return the otpauth:// URI for QR rendering.
+
+    The secret is NOT yet stored — the client must call /2fa/verify to confirm
+    they can produce a valid code before 2FA is activated.
+    """
+    import pyotp
+    secret = pyotp.random_base32()
+    totp = pyotp.TOTP(secret)
+    uri = totp.provisioning_uri(name=current_user.email, issuer_name="Underleaf")
+    return TotpEnableResponse(totp_secret=secret, provisioning_uri=uri)
+
+
+@router.post("/2fa/verify", response_model=TotpVerifyResponse)
+def totp_verify(
+    body: TotpVerifyRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Confirm 2FA setup: verify the first code, store secret, generate backup codes."""
+    import pyotp
+    totp = pyotp.TOTP(body.totp_secret)
+    if not totp.verify(body.code, valid_window=1):
+        raise HTTPException(status_code=400, detail="Invalid TOTP code")
+
+    # Delete existing backup codes (idempotent re-enable)
+    db.query(TotpBackupCode).filter(TotpBackupCode.user_id == current_user.id).delete()
+
+    # Generate 10 one-time backup codes
+    raw_codes = [secrets.token_hex(4).upper() for _ in range(10)]  # 8-char hex
+    for raw in raw_codes:
+        db.add(TotpBackupCode(user_id=current_user.id, code_hash=get_password_hash(raw)))
+
+    current_user.totp_secret = body.totp_secret
+    current_user.totp_enabled = True
+    db.commit()
+
+    return TotpVerifyResponse(backup_codes=raw_codes)
+
+
+@router.post("/2fa/disable")
+def totp_disable(
+    body: TotpDisableRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Disable 2FA after confirming the user's password."""
+    if not verify_password(body.password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Incorrect password")
+
+    current_user.totp_enabled = False
+    current_user.totp_secret = None
+    db.query(TotpBackupCode).filter(TotpBackupCode.user_id == current_user.id).delete()
+    db.commit()
+    return {"detail": "Two-factor authentication disabled"}
+
+
+@router.post("/2fa/login", response_model=LoginResponse)
+async def totp_login(
+    response: Response,
+    body: TotpLoginRequest,
+    db: Session = Depends(get_db),
+):
+    """Second-step: exchange a 2FA session token + TOTP code for full access token."""
+    import pyotp
+
+    # Look up the pending session
+    redis_key = f"2fa_session:{body.session_token}"
+    try:
+        user_id = await asyncio.wait_for(redis_service.get(redis_key), timeout=5.0)
+    except Exception as exc:
+        logger.error("Redis error during 2FA login: %s", exc)
+        raise HTTPException(status_code=503, detail="Service unavailable")
+
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.totp_enabled or not user.totp_secret:
+        raise HTTPException(status_code=401, detail="2FA not configured")
+
+    # Verify 6-digit TOTP code
+    totp = pyotp.TOTP(user.totp_secret)
+    code_valid = totp.verify(body.code, valid_window=1)
+
+    if not code_valid:
+        # Try backup codes
+        backup = (
+            db.query(TotpBackupCode)
+            .filter(TotpBackupCode.user_id == user.id, TotpBackupCode.used == False)  # noqa: E712
+            .all()
+        )
+        matched = next((bc for bc in backup if verify_password(body.code.upper(), bc.code_hash)), None)
+        if not matched:
+            raise HTTPException(status_code=401, detail="Invalid authentication code")
+        matched.used = True
+        db.commit()
+
+    # Consume the session token
+    try:
+        await asyncio.wait_for(redis_service.delete(redis_key), timeout=5.0)
+    except Exception:
+        pass
+
+    return await _issue_tokens(response, user.id)

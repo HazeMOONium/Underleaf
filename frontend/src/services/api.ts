@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { User, Project, ProjectFile, CompileJob, Snapshot, Token, Member, ProjectInvite, InvitePreview, Comment } from '../types'
+import type { User, Project, ProjectFile, CompileJob, Snapshot, Token, LoginResponse, Member, ProjectInvite, InvitePreview, Comment } from '../types'
 
 const api = axios.create({
   baseURL: '/api/v1',
@@ -74,10 +74,22 @@ export const authApi = {
     const formData = new URLSearchParams()
     formData.append('username', email)
     formData.append('password', password)
-    return api.post<Token>('/auth/login', formData, {
+    return api.post<LoginResponse>('/auth/login', formData, {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     })
   },
+
+  totpEnable: () =>
+    api.post<{ totp_secret: string; provisioning_uri: string }>('/auth/2fa/enable'),
+
+  totpVerify: (totp_secret: string, code: string) =>
+    api.post<{ backup_codes: string[] }>('/auth/2fa/verify', { totp_secret, code }),
+
+  totpDisable: (password: string) =>
+    api.post('/auth/2fa/disable', { password }),
+
+  totpLogin: (session_token: string, code: string) =>
+    api.post<LoginResponse>('/auth/2fa/login', { session_token, code }),
 
   me: () => api.get<User>('/auth/me'),
 

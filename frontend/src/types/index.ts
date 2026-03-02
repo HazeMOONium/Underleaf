@@ -3,6 +3,7 @@ export interface User {
   email: string
   role: string
   email_verified: boolean
+  totp_enabled: boolean
   created_at: string
 }
 
@@ -49,6 +50,13 @@ export interface Snapshot {
 export interface Token {
   access_token: string
   token_type: string
+}
+
+export interface LoginResponse {
+  access_token?: string
+  token_type: string
+  requires_2fa: boolean
+  session_token?: string
 }
 
 // ── Collaboration ─────────────────────────────────────────────────────────

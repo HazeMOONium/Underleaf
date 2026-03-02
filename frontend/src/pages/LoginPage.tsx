@@ -1,13 +1,15 @@
 import { useState, useEffect } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { useAuthStore } from '../stores/auth'
+import { useAuthStore, type TwoFAChallenge } from '../stores/auth'
 import toast from 'react-hot-toast'
 
 export default function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const { login, loading, fetchUser } = useAuthStore()
+  const [totpChallenge, setTotpChallenge] = useState<TwoFAChallenge | null>(null)
+  const [totpCode, setTotpCode] = useState('')
+  const { login, completeTotpLogin, loading, fetchUser } = useAuthStore()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const nextPath = searchParams.get('next') ?? '/'
@@ -26,25 +28,86 @@ export default function LoginPage() {
       await login(email, password)
       toast.success('Logged in successfully')
       navigate(nextPath)
-    } catch {
-      toast.error('Invalid credentials')
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'requires2FA' in err) {
+        setTotpChallenge(err as TwoFAChallenge)
+      } else {
+        toast.error('Invalid credentials')
+      }
     }
+  }
+
+  const handleTotpSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!totpChallenge) return
+    try {
+      await completeTotpLogin(totpChallenge.sessionToken, totpCode)
+      toast.success('Logged in successfully')
+      navigate(nextPath)
+    } catch {
+      toast.error('Invalid authentication code')
+      setTotpCode('')
+    }
+  }
+
+  const Logo = () => (
+    <div style={styles.logoArea}>
+      <div style={styles.logoIcon}>
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
+          <path d="M12 2L2 7v10l10 5 10-5V7L12 2z" fill="rgba(26,127,75,0.15)" stroke="#1a7f4b" strokeWidth="1.5" strokeLinejoin="round"/>
+          <path d="M2 7l10 5 10-5" stroke="#1a7f4b" strokeWidth="1.5"/>
+          <path d="M12 12v10" stroke="#1a7f4b" strokeWidth="1.5"/>
+        </svg>
+      </div>
+      <h1 style={styles.logoText}>Underleaf</h1>
+      <p style={styles.tagline}>Collaborative LaTeX editor</p>
+    </div>
+  )
+
+  if (totpChallenge) {
+    return (
+      <div style={styles.page}>
+        <div style={styles.card} className="animate-fade-in-scale">
+          <Logo />
+          <p style={{ textAlign: 'center', marginBottom: 20, color: 'var(--color-text-muted)', fontSize: 14 }}>
+            Enter the 6-digit code from your authenticator app, or one of your backup codes.
+          </p>
+          <form onSubmit={handleTotpSubmit} style={styles.form}>
+            <div style={styles.field}>
+              <label style={styles.label} htmlFor="totp-code">Authentication code</label>
+              <input
+                id="totp-code"
+                type="text"
+                inputMode="numeric"
+                value={totpCode}
+                onChange={(e) => setTotpCode(e.target.value.trim())}
+                placeholder="123456"
+                autoComplete="one-time-code"
+                autoFocus
+                maxLength={10}
+                required
+              />
+            </div>
+            <button type="submit" className="primary" disabled={loading} style={styles.submitBtn}>
+              {loading ? 'Verifying…' : 'Verify'}
+            </button>
+            <button
+              type="button"
+              style={{ ...styles.submitBtn, background: 'none', color: 'var(--color-text-muted)', border: '1px solid var(--color-border)' }}
+              onClick={() => { setTotpChallenge(null); setTotpCode('') }}
+            >
+              Back to login
+            </button>
+          </form>
+        </div>
+      </div>
+    )
   }
 
   return (
     <div style={styles.page}>
       <div style={styles.card} className="animate-fade-in-scale">
-        <div style={styles.logoArea}>
-          <div style={styles.logoIcon}>
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
-              <path d="M12 2L2 7v10l10 5 10-5V7L12 2z" fill="rgba(26,127,75,0.15)" stroke="#1a7f4b" strokeWidth="1.5" strokeLinejoin="round"/>
-              <path d="M2 7l10 5 10-5" stroke="#1a7f4b" strokeWidth="1.5"/>
-              <path d="M12 12v10" stroke="#1a7f4b" strokeWidth="1.5"/>
-            </svg>
-          </div>
-          <h1 style={styles.logoText}>Underleaf</h1>
-          <p style={styles.tagline}>Collaborative LaTeX editor</p>
-        </div>
+        <Logo />
 
         <form onSubmit={handleSubmit} style={styles.form}>
           <div style={styles.field}>

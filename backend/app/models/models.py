@@ -42,10 +42,13 @@ class User(Base):
     # Kept separate from the auth flow — unverified users can still log in, but the
     # frontend shows a persistent banner prompting them to verify.
     email_verified = Column(Boolean, default=False, nullable=False)
+    totp_secret = Column(String, nullable=True)
+    totp_enabled = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     projects = relationship("Project", back_populates="owner")
     permissions = relationship("Permission", foreign_keys="Permission.user_id", back_populates="user")
+    totp_backup_codes = relationship("TotpBackupCode", back_populates="user", cascade="all, delete-orphan")
 
 
 class Project(Base):
@@ -176,3 +179,15 @@ class Snapshot(Base):
 
     project = relationship("Project", back_populates="snapshots")
     compile_job = relationship("CompileJob", back_populates="snapshot")
+
+
+class TotpBackupCode(Base):
+    """Single-use backup codes for TOTP 2FA recovery."""
+    __tablename__ = "totp_backup_codes"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    code_hash = Column(String, nullable=False)
+    used = Column(Boolean, default=False, nullable=False)
+
+    user = relationship("User", back_populates="totp_backup_codes")
