@@ -56,6 +56,7 @@ class Project(Base):
     title = Column(String, nullable=False)
     visibility = Column(SQLEnum(ProjectVisibility), default=ProjectVisibility.PRIVATE, nullable=False)
     settings = Column(Text, default="{}")
+    engine = Column(String, default='pdflatex', nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 

@@ -59,6 +59,7 @@ async def create_compile_job(
                 "job_id": job.id,
                 "project_id": job.project_id,
                 "files": files_data,
+                "engine": project.engine or "pdflatex",
             }
         )
     except ConnectionError:

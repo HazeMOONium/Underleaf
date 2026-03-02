@@ -88,6 +88,7 @@ def create_project(
         owner_id=current_user.id,
         title=project_data.title,
         visibility=project_data.visibility,
+        engine=project_data.engine or 'pdflatex',
     )
     db.add(project)
     db.commit()
@@ -133,6 +134,8 @@ def update_project(
         project.visibility = project_data.visibility
     if project_data.settings is not None:
         project.settings = project_data.settings
+    if project_data.engine is not None:
+        project.engine = project_data.engine
     db.commit()
     db.refresh(project)
     return project

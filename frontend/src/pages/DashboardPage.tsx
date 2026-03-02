@@ -101,9 +101,212 @@ function relativeTime(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+// ── Project templates ─────────────────────────────────────────────────────
+
+const TEMPLATES = [
+  {
+    id: 'article',
+    name: 'Academic Article',
+    description: 'Standard article with abstract, sections, and bibliography',
+    files: {
+      'main.tex': `\\documentclass[12pt,a4paper]{article}
+\\usepackage[utf8]{inputenc}
+\\usepackage[T1]{fontenc}
+\\usepackage{amsmath,amssymb}
+\\usepackage{graphicx}
+\\usepackage[colorlinks=true,linkcolor=blue]{hyperref}
+\\usepackage{natbib}
+
+\\title{Your Title Here}
+\\author{Your Name}
+\\date{\\today}
+
+\\begin{document}
+\\maketitle
+
+\\begin{abstract}
+Write your abstract here.
+\\end{abstract}
+
+\\section{Introduction}
+\\label{sec:intro}
+
+Your introduction goes here.
+
+\\section{Methods}
+\\label{sec:methods}
+
+Describe your methods.
+
+\\section{Results}
+
+Present your results.
+
+\\section{Conclusion}
+
+Conclude your work.
+
+\\bibliographystyle{plainnat}
+\\bibliography{references}
+
+\\end{document}
+`,
+      'references.bib': `@article{example2024,
+  author  = {Author, A. and Author, B.},
+  title   = {An Example Paper},
+  journal = {Journal of Examples},
+  year    = {2024},
+  volume  = {1},
+  pages   = {1--10},
+}
+`,
+    },
+  },
+  {
+    id: 'beamer',
+    name: 'Beamer Presentation',
+    description: 'Slide deck with title page, outline, and content sections',
+    files: {
+      'main.tex': `\\documentclass{beamer}
+\\usetheme{Madrid}
+\\usepackage[utf8]{inputenc}
+
+\\title{Presentation Title}
+\\author{Your Name}
+\\institute{Your Institution}
+\\date{\\today}
+
+\\begin{document}
+
+\\begin{frame}
+  \\titlepage
+\\end{frame}
+
+\\begin{frame}{Outline}
+  \\tableofcontents
+\\end{frame}
+
+\\section{Introduction}
+\\begin{frame}{Introduction}
+  \\begin{itemize}
+    \\item First point
+    \\item Second point
+  \\end{itemize}
+\\end{frame}
+
+\\section{Conclusion}
+\\begin{frame}{Conclusion}
+  \\begin{itemize}
+    \\item Summary point 1
+    \\item Summary point 2
+  \\end{itemize}
+\\end{frame}
+
+\\end{document}
+`,
+    },
+  },
+  {
+    id: 'report',
+    name: 'Technical Report',
+    description: 'Multi-chapter report with table of contents and appendix',
+    files: {
+      'main.tex': `\\documentclass[12pt,a4paper]{report}
+\\usepackage[utf8]{inputenc}
+\\usepackage[T1]{fontenc}
+\\usepackage{amsmath}
+\\usepackage{graphicx}
+\\usepackage[margin=2.5cm]{geometry}
+\\usepackage{hyperref}
+
+\\title{Technical Report Title}
+\\author{Author Name}
+\\date{\\today}
+
+\\begin{document}
+\\maketitle
+\\tableofcontents
+\\newpage
+
+\\chapter{Introduction}
+
+This is the introduction chapter.
+
+\\chapter{Background}
+
+Background and related work.
+
+\\chapter{Approach}
+
+Describe your approach.
+
+\\chapter{Evaluation}
+
+Results and evaluation.
+
+\\chapter{Conclusion}
+
+Summary and future work.
+
+\\appendix
+\\chapter{Additional Details}
+
+Appendix content.
+
+\\end{document}
+`,
+    },
+  },
+  {
+    id: 'cv',
+    name: 'Curriculum Vitae',
+    description: 'Clean CV / résumé with education, experience, and skills',
+    files: {
+      'main.tex': `\\documentclass[11pt,a4paper]{article}
+\\usepackage[utf8]{inputenc}
+\\usepackage[T1]{fontenc}
+\\usepackage[margin=2cm]{geometry}
+\\usepackage{enumitem}
+\\usepackage{titlesec}
+\\usepackage{hyperref}
+\\usepackage{parskip}
+
+\\titleformat{\\section}{\\large\\bfseries}{}{0em}{}[\\titlerule]
+\\setlist[itemize]{leftmargin=1.5em,topsep=2pt,itemsep=1pt}
+
+\\begin{document}
+
+{\\LARGE \\textbf{Your Name}}\\\\[4pt]
+your.email@example.com \\quad | \\quad +1 (555) 123-4567 \\quad | \\quad City, Country
+
+\\section{Education}
+\\textbf{Degree, Major} \\hfill 2020--2024\\\\
+University Name, City
+
+\\section{Experience}
+\\textbf{Job Title} \\hfill Jan 2024--Present\\\\
+Company Name, City
+\\begin{itemize}
+  \\item Key accomplishment
+  \\item Another achievement
+\\end{itemize}
+
+\\section{Skills}
+\\begin{itemize}
+  \\item \\textbf{Programming:} Python, JavaScript, C++
+  \\item \\textbf{Tools:} Git, Docker, LaTeX
+\\end{itemize}
+
+\\end{document}
+`,
+    },
+  },
+] as const
+
 export default function DashboardPage() {
   const [newProjectTitle, setNewProjectTitle] = useState('')
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const [showTemplateModal, setShowTemplateModal] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameTitle, setRenameTitle] = useState('')
   const [search, setSearch] = useState('')
@@ -184,6 +387,22 @@ export default function DashboardPage() {
     }
   }
 
+  const createFromTemplate = async (template: typeof TEMPLATES[number]) => {
+    setShowTemplateModal(false)
+    try {
+      const res = await projectsApi.create(template.name)
+      const projectId = res.data.id
+      for (const [path, content] of Object.entries(template.files)) {
+        await projectsApi.createFile(projectId, path, content)
+      }
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
+      toast.success(`"${template.name}" created from template`)
+      navigate(`/project/${projectId}`)
+    } catch {
+      toast.error('Failed to create project from template')
+    }
+  }
+
   const userInitial = (user?.email?.[0] ?? 'U').toUpperCase()
 
   return (
@@ -227,14 +446,26 @@ export default function DashboardPage() {
                 : `${projects?.length ?? 0} project${(projects?.length ?? 0) !== 1 ? 's' : ''}`}
             </p>
           </div>
-          <button
-            className="primary"
-            style={styles.newBtn}
-            onClick={() => setShowCreateModal(true)}
-          >
-            <span style={{ fontSize: '16px', lineHeight: 1 }}>+</span>
-            New Project
-          </button>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button
+              style={styles.templateBtn}
+              onClick={() => setShowTemplateModal(true)}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 5, verticalAlign: 'middle' }}>
+                <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+                <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+              </svg>
+              From template
+            </button>
+            <button
+              className="primary"
+              style={styles.newBtn}
+              onClick={() => setShowCreateModal(true)}
+            >
+              <span style={{ fontSize: '16px', lineHeight: 1 }}>+</span>
+              New Project
+            </button>
+          </div>
         </div>
 
         {/* Search bar */}
@@ -320,6 +551,54 @@ export default function DashboardPage() {
       </main>
 
       {/* Create modal */}
+      {/* Template picker modal */}
+      {showTemplateModal && (
+        <div style={styles.modalOverlay} onClick={() => setShowTemplateModal(false)}>
+          <div
+            style={{ ...styles.modal, maxWidth: '580px' }}
+            onClick={(e) => e.stopPropagation()}
+            className="animate-fade-in-scale"
+          >
+            <div style={styles.modalHeader}>
+              <h3 style={styles.modalTitle}>Choose a template</h3>
+              <button style={styles.modalClose} onClick={() => setShowTemplateModal(false)}>✕</button>
+            </div>
+            <div style={{ padding: '20px 24px 24px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+              {TEMPLATES.map((tpl) => (
+                <button
+                  key={tpl.id}
+                  onClick={() => createFromTemplate(tpl)}
+                  style={{
+                    textAlign: 'left',
+                    background: 'var(--color-bg)',
+                    border: '1.5px solid var(--color-border)',
+                    borderRadius: 'var(--radius-lg)',
+                    padding: '16px',
+                    cursor: 'pointer',
+                    transition: 'border-color var(--transition-fast), box-shadow var(--transition-fast)',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.borderColor = 'var(--color-brand)'
+                    e.currentTarget.style.boxShadow = 'var(--shadow-brand)'
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.borderColor = 'var(--color-border)'
+                    e.currentTarget.style.boxShadow = 'none'
+                  }}
+                >
+                  <div style={{ fontWeight: 600, fontSize: '14px', marginBottom: '6px', color: 'var(--color-text)' }}>
+                    {tpl.name}
+                  </div>
+                  <div style={{ fontSize: '12px', color: 'var(--color-text-muted)', lineHeight: 1.4 }}>
+                    {tpl.description}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {showCreateModal && (
         <div style={styles.modalOverlay} onClick={() => setShowCreateModal(false)}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()} className="animate-fade-in-scale">
@@ -658,6 +937,18 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '6px',
     padding: '9px 18px',
     fontSize: '13px',
+  },
+  templateBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+    padding: '9px 16px',
+    fontSize: '13px',
+    background: 'transparent',
+    border: '1.5px solid var(--color-border)',
+    borderRadius: 'var(--radius-md)',
+    color: 'var(--color-text)',
+    cursor: 'pointer',
   },
   searchRow: {
     marginBottom: '20px',

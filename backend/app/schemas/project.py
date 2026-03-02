@@ -9,13 +9,14 @@ class ProjectBase(BaseModel):
 
 
 class ProjectCreate(ProjectBase):
-    pass
+    engine: Optional[str] = 'pdflatex'
 
 
 class ProjectUpdate(BaseModel):
     title: Optional[str] = None
     visibility: Optional[str] = None
     settings: Optional[str] = None
+    engine: Optional[str] = None
 
 
 class ProjectResponse(ProjectBase):
@@ -24,6 +25,7 @@ class ProjectResponse(ProjectBase):
     id: str
     owner_id: str
     settings: str
+    engine: str = 'pdflatex'
     created_at: datetime
     updated_at: datetime
 

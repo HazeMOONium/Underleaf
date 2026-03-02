@@ -156,6 +156,13 @@ export default function EditorPage() {
   const [showCommentsPanel, setShowCommentsPanel] = useState(false)
   const [commentFocusLine, setCommentFocusLine] = useState<number | null>(null)
 
+  // Engine selector — synced from project data
+  const [engine, setEngine] = useState<string>('pdflatex')
+
+  // Word / character count
+  const [wordCount, setWordCount] = useState(0)
+  const [charCount, setCharCount] = useState(0)
+
   // Feature A: structured log parsing
   const [issuesExpanded, setIssuesExpanded] = useState(true)
 
@@ -235,6 +242,11 @@ export default function EditorPage() {
     enabled: !!projectId && myRole !== false,
   })
 
+  // Sync engine from project data
+  useEffect(() => {
+    if (project?.engine) setEngine(project.engine)
+  }, [project?.engine])
+
   // ── Project-level Yjs setup ──────────────────────────────────────────────
   // Create one ydoc + WebSocket provider per project. They live until the
   // user navigates away. Per-file MonacoBindings are created separately.
@@ -274,16 +286,43 @@ export default function EditorPage() {
     provider.awareness.on('change', updateUsers)
     updateUsers()
 
-    // When a new peer joins, re-broadcast our cursor so they see it immediately
-    // without waiting for the local user to move.
-    const onPeerJoin = ({ added }: { added: number[] }) => {
-      if (added.length === 0 || !user || !editorRef.current) return
-      const pos = editorRef.current.getPosition()
-      provider.awareness.setLocalStateField('user', {
-        name: user.email,
-        color: userColor(user.id),
-        cursor: pos ? { lineNumber: pos.lineNumber, column: pos.column } : undefined,
+    // Track clientId → email so we can show "X left" with their name
+    const peerNames = new Map<number, string>()
+
+    // When peers join/leave: re-broadcast cursor AND show toasts
+    const onPeerJoin = ({ added, removed }: { added: number[]; removed: number[] }) => {
+      const states = provider.awareness.getStates()
+
+      // Toast for newly joined peers
+      added.forEach((clientId) => {
+        if (clientId === provider.awareness.clientID) return
+        const state = states.get(clientId) as { user?: { name?: string } } | undefined
+        const email = state?.user?.name
+        if (email) {
+          peerNames.set(clientId, email)
+          toast(`${email} joined`, { icon: '👋', duration: 3000, id: `join-${clientId}` })
+        }
       })
+
+      // Toast for peers who left
+      removed.forEach((clientId) => {
+        if (clientId === provider.awareness.clientID) return
+        const name = peerNames.get(clientId)
+        if (name) {
+          peerNames.delete(clientId)
+          toast(`${name} left`, { duration: 2000, id: `leave-${clientId}` })
+        }
+      })
+
+      // Re-broadcast our own cursor when someone joins so they see it immediately
+      if (added.length > 0 && user && editorRef.current) {
+        const pos = editorRef.current.getPosition()
+        provider.awareness.setLocalStateField('user', {
+          name: user.email,
+          color: userColor(user.id),
+          cursor: pos ? { lineNumber: pos.lineNumber, column: pos.column } : undefined,
+        })
+      }
     }
     provider.awareness.on('change', onPeerJoin)
 
@@ -375,11 +414,19 @@ export default function EditorPage() {
 
       // Mirror ytext into the content state for AI panel / outline / save
       const syncContent = () => {
-        if (mountedRef.current) setContent(ytext.toString())
+        if (!mountedRef.current) return
+        const text = ytext.toString()
+        setContent(text)
+        setCharCount(text.length)
+        setWordCount(text.trim() === '' ? 0 : text.trim().split(/\s+/).length)
       }
       ytext.observe(syncContent)
       ytextObserverRef.current = syncContent
       setContent(ytext.toString())
+      // Initialise counts for the newly loaded file
+      const initText = ytext.toString()
+      setCharCount(initText.length)
+      setWordCount(initText.trim() === '' ? 0 : initText.trim().split(/\s+/).length)
     }
 
     setup().catch(console.error)
@@ -1208,6 +1255,31 @@ export default function EditorPage() {
             </button>
           )}
           {editorRole && (
+            <select
+              value={engine}
+              onChange={(e) => {
+                const newEngine = e.target.value
+                setEngine(newEngine)
+                projectsApi.update(projectId!, { engine: newEngine }).catch(() => {})
+              }}
+              title="LaTeX engine"
+              style={{
+                background: 'rgba(255,255,255,0.08)',
+                border: '1px solid rgba(255,255,255,0.15)',
+                borderRadius: 'var(--radius-md)',
+                color: '#fff',
+                fontSize: '12px',
+                padding: '5px 8px',
+                cursor: 'pointer',
+                outline: 'none',
+              }}
+            >
+              <option value="pdflatex">pdflatex</option>
+              <option value="xelatex">xelatex</option>
+              <option value="lualatex">lualatex</option>
+            </select>
+          )}
+          {editorRole && (
             <button
               className="primary"
               onClick={() => compile.mutate()}
@@ -1289,27 +1361,47 @@ export default function EditorPage() {
         </aside>
 
         {/* ── Editor ───────────────────────────────────────────────────── */}
-        <div style={styles.editor}>
-          <Editor
-            height="100%"
-            defaultLanguage="latex"
-            theme="vs-light"
-            beforeMount={handleEditorBeforeMount}
-            onMount={handleEditorMount}
-            options={{
-              readOnly: !editorRole,
-              minimap: { enabled: false },
-              fontSize: 14,
-              wordWrap: 'on',
-              lineNumbers: 'on',
-              glyphMargin: true,
-              folding: true,
-              quickSuggestions: true,
-              suggestOnTriggerCharacters: true,
-              tabCompletion: 'on',
-              renderLineHighlight: 'gutter',
-            }}
-          />
+        <div style={{ ...styles.editor, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <Editor
+              height="100%"
+              defaultLanguage="latex"
+              theme="vs-light"
+              beforeMount={handleEditorBeforeMount}
+              onMount={handleEditorMount}
+              options={{
+                readOnly: !editorRole,
+                minimap: { enabled: false },
+                fontSize: 14,
+                wordWrap: 'on',
+                lineNumbers: 'on',
+                glyphMargin: true,
+                folding: true,
+                quickSuggestions: true,
+                suggestOnTriggerCharacters: true,
+                tabCompletion: 'on',
+                renderLineHighlight: 'gutter',
+              }}
+            />
+          </div>
+          {/* Status bar — word / char count */}
+          <div style={{
+            height: '22px',
+            background: 'var(--color-header-bg)',
+            borderTop: '1px solid rgba(255,255,255,0.08)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'flex-end',
+            paddingRight: '16px',
+            gap: '16px',
+            fontSize: '11px',
+            color: 'rgba(255,255,255,0.45)',
+            fontFamily: 'var(--font-mono)',
+            flexShrink: 0,
+          }}>
+            <span>{wordCount.toLocaleString()} words</span>
+            <span>{charCount.toLocaleString()} chars</span>
+          </div>
         </div>
 
         {/* Comments panel */}

@@ -12,6 +12,7 @@ export interface Project {
   title: string
   visibility: 'private' | 'public'
   settings: string
+  engine: string
   created_at: string
   updated_at: string
 }
