@@ -84,15 +84,12 @@ Track a history of compile events as "snapshots":
 - **Backend**: new `Snapshot` model + API endpoints
 - **Effort**: L (6–8h)
 
-### Comment notification emails
+### ~~Comment notification emails~~ ✅ Done
 
-Send email notifications when:
-
-- Someone comments on a file in your project
-- Someone replies to your comment
-- A thread you're participating in is resolved
-- Requires email service to be configured (SMTP env vars)
-- **Effort**: M (3–4h)
+Notifications sent via `BackgroundTasks` (no-op when SMTP not configured):
+- New top-level comment → project owner notified
+- Reply → parent comment's author notified
+- Thread resolved → root comment author notified
 
 ### ~~Presence improvements~~ ✅ Done
 
@@ -102,15 +99,11 @@ Presence bar capped at 3 peer avatars + overflow `+N` badge with tooltip listing
 
 ## Auth & access
 
-### JWT refresh tokens
+### ~~JWT refresh tokens~~ ✅ Done
 
-Current tokens are 24-hour access tokens with no refresh mechanism. Add:
-
-- Short-lived access tokens (15 min)
-- Long-lived refresh tokens (30 days) stored in httpOnly cookies
-- `POST /auth/refresh` endpoint
-- Silent token refresh in the Axios interceptor
-- **Effort**: M (3–5h)
+Access tokens reduced to 15 min; long-lived refresh tokens (30 days) in httpOnly cookie.
+`POST /auth/refresh` rotates the token. Axios interceptor retries on 401 with queuing.
+CORS updated to specific origins (required for `withCredentials`).
 
 ### Two-factor authentication (TOTP)
 
@@ -168,14 +161,12 @@ Currently partial — implement full resolution for multi-file projects.
 
 `JSONFormatter` emits all extra fields as top-level JSON keys (`method`, `path`, `status`, `duration` ms, `request_id`). `LoggingMiddleware` logs a clean `"request"` message with structured extras.
 
-### Prometheus metrics dashboard
+### ~~Prometheus metrics dashboard~~ ✅ Done
 
-A Grafana dashboard is implied by the Prometheus middleware already wired in `main.py`. Create:
-
-- `grafana/dashboards/underleaf.json` — pre-built Grafana dashboard
-- Key panels: request rate, p50/p95/p99 latency, compile job throughput, error rate, active WebSocket connections
-- Add to `docker-compose.dev.yml` (Grafana + Prometheus services)
-- **Effort**: M (3–4h)
+`deploy/grafana/dashboards/underleaf.json` — pre-built dashboard with panels:
+request rate, p50/p95/p99 latency, error rate, compile throughput, stat tiles.
+Prometheus (port 19090) and Grafana (port 13000) added to `docker-compose.dev.yml`.
+Grafana auto-provisions the datasource and dashboard on startup.
 
 ### Production Docker Compose hardening
 
