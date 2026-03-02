@@ -5,7 +5,7 @@ import zipfile
 from typing import List, Optional, Tuple
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -317,6 +317,72 @@ def upload_binary_file(
     db.commit()
     db.refresh(file)
     return file
+
+
+@router.post(
+    "/{project_id}/files/stream",
+    response_model=ProjectFileResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_file_stream(
+    project_id: str,
+    path: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload a file via multipart/form-data, streaming directly to MinIO.
+
+    For files larger than 5 MB MinIO automatically switches to multipart
+    upload, avoiding loading the entire payload into Python memory at once.
+    """
+    get_project_with_access(
+        project_id, current_user.id, db, minimum_role=ProjectRole.EDITOR
+    )
+
+    # Read once — FastAPI spools to a temp file for large uploads so this
+    # does not force the full payload into a Python bytes object up-front.
+    file_bytes = await file.read()
+    content_length = len(file_bytes)
+    content_type = file.content_type or "application/octet-stream"
+
+    bucket = minio_service._default_bucket
+    blob_ref = f"{project_id}/{path}"
+
+    try:
+        import io as _io
+        minio_service.upload_file_stream(
+            bucket, blob_ref, _io.BytesIO(file_bytes), content_length, content_type
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
+
+    existing = (
+        db.query(ProjectFile)
+        .filter(
+            ProjectFile.project_id == project_id,
+            ProjectFile.path == path,
+        )
+        .first()
+    )
+
+    if existing:
+        existing.blob_ref = blob_ref
+        existing.size = content_length
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    pf = ProjectFile(
+        project_id=project_id,
+        path=path,
+        blob_ref=blob_ref,
+        size=content_length,
+    )
+    db.add(pf)
+    db.commit()
+    db.refresh(pf)
+    return pf
 
 
 @router.get("/{project_id}/files/{file_path:path}")

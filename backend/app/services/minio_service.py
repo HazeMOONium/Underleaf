@@ -58,6 +58,35 @@ class MinIOService:
             logger.error(f"Failed to upload file: {e}")
             raise ConnectionError(f"Failed to upload file: {e}")
 
+    def upload_file_stream(
+        self,
+        bucket: str,
+        object_name: str,
+        stream: BytesIO,
+        content_length: int,
+        content_type: str = "application/octet-stream",
+    ) -> str:
+        """Upload from a stream directly to MinIO, using multipart for files > 5 MB.
+
+        MinIO's ``put_object`` automatically selects multipart upload when
+        ``content_length >= part_size`` (default 5 MiB), so this avoids
+        loading large files entirely into memory.
+        """
+        try:
+            self.ensure_bucket_exists(bucket)
+            self.client.put_object(
+                bucket,
+                object_name,
+                stream,
+                content_length,
+                content_type=content_type,
+            )
+            logger.info(f"Stream-uploaded {object_name} ({content_length} B) to bucket {bucket}")
+            return object_name
+        except S3Error as e:
+            logger.error(f"Failed to stream-upload file: {e}")
+            raise ConnectionError(f"Failed to upload file: {e}")
+
     def download_file(self, bucket: str, blob_ref: str) -> bytes:
         try:
             response = self.client.get_object(bucket, blob_ref)

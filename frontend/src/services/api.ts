@@ -131,6 +131,14 @@ export const projectsApi = {
   uploadBinaryFile: (projectId: string, path: string, contentBase64: string) =>
     api.post(`/projects/${projectId}/files/upload`, { path, content_base64: contentBase64 }),
 
+  /** Stream-upload a raw File object via multipart/form-data (no base64 overhead). */
+  uploadFile: (projectId: string, path: string, file: File) => {
+    const form = new FormData()
+    form.append('path', path)
+    form.append('file', file)
+    return api.post(`/projects/${projectId}/files/stream`, form)
+  },
+
   exportZip: (projectId: string) =>
     api.get(`/projects/${projectId}/export/zip`, { responseType: 'blob' }),
 }

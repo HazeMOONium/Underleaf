@@ -1315,19 +1315,16 @@ export default function EditorPage() {
               }
               reader.readAsText(file)
             } else if (binaryExts.includes(ext)) {
-              reader.onload = async () => {
+              // Use streaming multipart upload — no base64 encoding overhead
+              ;(async () => {
                 try {
-                  // Strip the data URL prefix to get raw base64
-                  const dataUrl = reader.result as string
-                  const base64 = dataUrl.split(',')[1] ?? ''
-                  await projectsApi.uploadBinaryFile(projectId, file.name, base64)
+                  await projectsApi.uploadFile(projectId, file.name, file)
                   toast.success(`Uploaded: ${file.name}`)
                 } catch {
                   toast.error(`Failed to upload ${file.name}`)
                 }
                 resolve()
-              }
-              reader.readAsDataURL(file)
+              })()
             } else {
               toast.error(`Unsupported file type: ${file.name}`)
               resolve()
