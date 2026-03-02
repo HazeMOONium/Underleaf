@@ -1,173 +1,194 @@
 import { WebSocketServer, WebSocket } from 'ws'
 // @ts-ignore - no type declarations for y-websocket/bin/utils
-import { setupWSConnection, setPersistence } from 'y-websocket/bin/utils'
+import { setupWSConnection, setPersistence, docs } from 'y-websocket/bin/utils'
 import * as Y from 'yjs'
 import Redis from 'ioredis'
 import * as dotenv from 'dotenv'
 
-// Load environment variables
 dotenv.config()
 
 const PORT = parseInt(process.env.PORT || '1234')
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379'
 
-// Initialize Redis client
-const redis = new Redis(REDIS_URL, {
+const redisOpts = {
   maxRetriesPerRequest: 3,
-  retryStrategy(times) {
-    const delay = Math.min(times * 50, 2000)
-    return delay
-  }
+  retryStrategy(times: number) {
+    return Math.min(times * 50, 2000)
+  },
+}
+
+// ── Three Redis clients ───────────────────────────────────────────────────────
+// 1. persistence: for snapshot read/write (get/set)
+// 2. pubClient: for publishing doc updates to other instances
+// 3. subClient: for subscribing to updates from other instances
+//    (a subscribed client can only call subscribe/unsubscribe/psubscribe, not get/set)
+const persistence_redis = new Redis(REDIS_URL, redisOpts)
+const pubClient = new Redis(REDIS_URL, redisOpts)
+const subClient = new Redis(REDIS_URL, redisOpts)
+
+for (const [name, client] of [['persistence', persistence_redis], ['pub', pubClient], ['sub', subClient]] as const) {
+  client.on('connect', () => console.log(`Redis [${name}] connected`))
+  client.on('error', (err) => console.error(`Redis [${name}] error:`, err))
+}
+
+// ── Horizontal scaling: pub/sub relay ────────────────────────────────────────
+// When this instance receives a Yjs update from a client, it:
+//   a) applies + broadcasts to local clients (handled by y-websocket internally)
+//   b) publishes the raw update bytes to Redis channel yjs:updates:{docName}
+// Other instances subscribe to that channel, receive the bytes, and apply
+// them to their local in-memory Y.Doc (which then broadcasts to their clients).
+
+const RELAY_ORIGIN = 'redis-relay' // sentinel to avoid re-publishing
+const subscribedDocs = new Set<string>()
+
+/** Subscribe this instance to updates from other collab-server instances for docName. */
+function ensureDocRelay(docName: string): void {
+  if (subscribedDocs.has(docName)) return
+  subscribedDocs.add(docName)
+
+  // ioredis requires subscribe before receiving messages on subClient.
+  // Use the buffer-aware variant so Yjs binary data round-trips correctly.
+  subClient.subscribe(`yjs:updates:${docName}`, (err) => {
+    if (err) console.error(`Failed to subscribe to yjs:updates:${docName}:`, err)
+    else console.log(`Subscribed to Redis relay for doc: ${docName}`)
+  })
+
+  // Add publisher hook to the Y.Doc once it appears in the docs map.
+  // setupWSConnection populates docs synchronously, so deferring by one
+  // microtask is enough.
+  process.nextTick(() => {
+    const doc = docs.get(docName) as Y.Doc | undefined
+    if (!doc) return
+
+    doc.on('update', (update: Uint8Array, origin: unknown) => {
+      if (origin === RELAY_ORIGIN) return // don't re-publish what we just received
+      pubClient
+        .publish(`yjs:updates:${docName}`, Buffer.from(update))
+        .catch((err) => console.error(`Publish error for ${docName}:`, err))
+    })
+  })
+}
+
+// Receive updates from other instances and apply to local doc
+subClient.on('message', (channel: string, message: string | Buffer) => {
+  const docName = channel.replace('yjs:updates:', '')
+  const doc = docs.get(docName) as Y.Doc | undefined
+  if (!doc) return
+
+  const update = typeof message === 'string' ? Buffer.from(message, 'binary') : message
+  Y.applyUpdate(doc, new Uint8Array(update), RELAY_ORIGIN)
 })
 
-redis.on('connect', () => {
-  console.log('Redis connected successfully')
-})
-
-redis.on('error', (err) => {
-  console.error('Redis connection error:', err)
-})
-
-// Track active connections per document
+// ── Connection tracking per document ─────────────────────────────────────────
 const connectionCounts = new Map<string, number>()
 
-// Redis persistence implementation
+// ── Redis persistence (snapshot save/restore) ─────────────────────────────────
 const persistence = {
-  /**
-   * Called when a document is loaded (first client connects)
-   * Restores state from Redis if available
-   */
   async bindState(docName: string, ydoc: Y.Doc): Promise<void> {
     try {
-      const key = `yjs:doc:${docName}`
-      const state = await redis.getBuffer(key)
-
+      const state = await persistence_redis.getBuffer(`yjs:doc:${docName}`)
       if (state && state.length > 0) {
         Y.applyUpdate(ydoc, state)
-        console.log(`Restored document ${docName} from Redis (${state.length} bytes)`)
+        console.log(`Restored doc ${docName} from Redis (${state.length} B)`)
       } else {
-        console.log(`No existing state for document ${docName}, starting fresh`)
+        console.log(`No snapshot for doc ${docName}, starting fresh`)
       }
-
-      // Track connection
-      connectionCounts.set(docName, (connectionCounts.get(docName) || 0) + 1)
-      console.log(`Document ${docName} now has ${connectionCounts.get(docName)} connection(s)`)
-    } catch (error) {
-      console.error(`Error loading state for ${docName}:`, error)
-      // Don't throw - allow document to start empty on error
+      connectionCounts.set(docName, (connectionCounts.get(docName) ?? 0) + 1)
+    } catch (err) {
+      console.error(`Error loading state for ${docName}:`, err)
     }
   },
 
-  /**
-   * Called when all clients disconnect from a document
-   * Saves state to Redis
-   */
   async writeState(docName: string, ydoc: Y.Doc): Promise<void> {
     try {
-      const key = `yjs:doc:${docName}`
       const state = Y.encodeStateAsUpdate(ydoc)
+      await persistence_redis.set(`yjs:doc:${docName}`, Buffer.from(state))
+      console.log(`Persisted doc ${docName} (${state.length} B)`)
 
-      await redis.set(key, Buffer.from(state))
-      console.log(`Persisted document ${docName} to Redis (${state.length} bytes)`)
-
-      // Update connection count
-      const count = (connectionCounts.get(docName) || 1) - 1
+      const count = (connectionCounts.get(docName) ?? 1) - 1
       if (count <= 0) {
         connectionCounts.delete(docName)
-        console.log(`Document ${docName} has no active connections, state persisted`)
+        // Unsubscribe from relay — no local clients left for this doc
+        if (subscribedDocs.has(docName)) {
+          subscribedDocs.delete(docName)
+          subClient.unsubscribe(`yjs:updates:${docName}`).catch(() => {})
+          console.log(`Unsubscribed relay for doc: ${docName}`)
+        }
       } else {
         connectionCounts.set(docName, count)
-        console.log(`Document ${docName} now has ${count} connection(s)`)
       }
-    } catch (error) {
-      console.error(`Error persisting state for ${docName}:`, error)
-      // Don't throw - failing to persist shouldn't crash the server
+    } catch (err) {
+      console.error(`Error persisting state for ${docName}:`, err)
     }
-  }
+  },
 }
 
-// Register persistence handler
 setPersistence(persistence)
-console.log('Redis persistence enabled')
+console.log('Redis persistence + pub/sub relay enabled')
 
-// Periodic snapshot: save all active docs every 60s so state survives server crashes
-// (the writeState persistence hook only fires on full disconnect)
+// ── Periodic snapshot (survives crashes) ─────────────────────────────────────
 const activeDocs = new Map<string, Y.Doc>()
 
-const _origBindState = persistence.bindState.bind(persistence)
+const _origBind = persistence.bindState.bind(persistence)
 persistence.bindState = async (docName: string, ydoc: Y.Doc) => {
-  await _origBindState(docName, ydoc)
+  await _origBind(docName, ydoc)
   activeDocs.set(docName, ydoc)
 }
 
-const _origWriteState = persistence.writeState.bind(persistence)
+const _origWrite = persistence.writeState.bind(persistence)
 persistence.writeState = async (docName: string, ydoc: Y.Doc) => {
-  await _origWriteState(docName, ydoc)
-  // Remove from active tracking only when no connections remain
-  if (!connectionCounts.has(docName)) {
-    activeDocs.delete(docName)
-  }
+  await _origWrite(docName, ydoc)
+  if (!connectionCounts.has(docName)) activeDocs.delete(docName)
 }
 
 setInterval(async () => {
   for (const [docName, ydoc] of activeDocs) {
     try {
-      const key = `yjs:doc:${docName}`
       const state = Y.encodeStateAsUpdate(ydoc)
-      await redis.set(key, Buffer.from(state))
+      await persistence_redis.set(`yjs:doc:${docName}`, Buffer.from(state))
     } catch (err) {
       console.error(`Periodic snapshot failed for ${docName}:`, err)
     }
   }
 }, 60_000)
 
+// ── WebSocket server ──────────────────────────────────────────────────────────
 const wss = new WebSocketServer({ port: PORT })
 
-console.log(`Yjs WebSocket server running on port ${PORT}`)
-
 wss.on('connection', (ws: WebSocket, req: any) => {
-  console.log('New connection from:', req.url)
+  // y-websocket uses the URL path (without leading slash) as the document name
+  const docName = (req.url as string || '/').replace(/^\//, '').split('?')[0]
   setupWSConnection(ws, req, { gc: true })
+  ensureDocRelay(docName)
 })
 
 wss.on('listening', () => {
-  console.log('WebSocket server is ready')
+  console.log(`Yjs WebSocket server running on port ${PORT} (Redis pub/sub relay enabled)`)
 })
 
-// Graceful shutdown handler
+// ── Graceful shutdown ─────────────────────────────────────────────────────────
 const shutdown = async (signal: string) => {
-  console.log(`${signal} received, shutting down gracefully...`)
+  console.log(`${signal} received, flushing ${activeDocs.size} doc(s) to Redis...`)
+  wss.close()
 
-  // Close WebSocket server (stops accepting new connections)
-  wss.close(() => {
-    console.log('WebSocket server closed')
-  })
-
-  // Flush all active docs to Redis before exiting so in-flight changes survive
-  // the shutdown. This is a best-effort save — individual failures are logged
-  // but don't block the shutdown sequence.
-  console.log(`Flushing ${activeDocs.size} active document(s) to Redis...`)
   await Promise.allSettled(
     Array.from(activeDocs.entries()).map(async ([docName, ydoc]) => {
       try {
-        const key = `yjs:doc:${docName}`
         const state = Y.encodeStateAsUpdate(ydoc)
-        await redis.set(key, Buffer.from(state))
-        console.log(`Flushed ${docName} (${state.length} bytes)`)
+        await persistence_redis.set(`yjs:doc:${docName}`, Buffer.from(state))
+        console.log(`Flushed ${docName} (${state.length} B)`)
       } catch (err) {
-        console.error(`Failed to flush ${docName} on shutdown:`, err)
+        console.error(`Failed to flush ${docName}:`, err)
       }
     })
   )
 
-  // Close Redis connection
-  try {
-    await redis.quit()
-    console.log('Redis connection closed')
-  } catch (error) {
-    console.error('Error closing Redis connection:', error)
-  }
-
+  await Promise.allSettled([
+    persistence_redis.quit(),
+    pubClient.quit(),
+    subClient.quit(),
+  ])
+  console.log('Redis connections closed')
   process.exit(0)
 }
 
