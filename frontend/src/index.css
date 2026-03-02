@@ -437,3 +437,9 @@ aside button:not(.primary):not(.secondary):hover {
 /* Classes injected dynamically per user — kept here as reference structure */
 /* [data-color]-selection: { background: color+40 }                          */
 /* [data-color]-cursorline: { background: color+15 }                         */
+
+/* ─── File tree row hover reveals ⋮ kebab button ─────────────────────────── */
+.tree-kebab { opacity: 0 !important; transition: opacity 0.15s; }
+li:hover > div > .tree-kebab,
+li:focus-within > div > .tree-kebab { opacity: 0.55 !important; }
+.tree-kebab:hover { opacity: 1 !important; }

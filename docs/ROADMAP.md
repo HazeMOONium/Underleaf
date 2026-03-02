@@ -48,14 +48,12 @@ Integrate `nspell` (hunspell-compatible JS) for English spell checking in Monaco
 
 Duplicate `\label` detection added to `registerLatexDiagnostics`. Existing checks already covered: unmatched `\begin/\end`, missing `\end{document}`, unclosed `$$`/`$`.
 
-### File/folder context menu
+### ~~File/folder context menu~~ ✅ Done
 
-Replace the current inline rename/delete buttons with a right-click context menu (or hover ⋮ kebab):
-
-- File: Rename, Delete, Download, Duplicate
-- Folder: New File Here, New Subfolder, Rename, Delete All
-- Custom lightweight dropdown — no heavy library required
-- **Effort**: M (2–3h)
+Right-click context menu (was already partially there). Added:
+- **Duplicate** for files (creates `name-copy.ext` with same content)
+- **Delete All** for folders (deletes all children with confirmation)
+- **⋮ kebab button** on hover for each row (opens same context menu)
 
 ### ~~Multi-cursor find & replace~~ ✅ Done
 

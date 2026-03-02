@@ -28,6 +28,8 @@ interface FileTreeProps {
   onNewFileInFolder?: (folderPath: string) => void
   onCreateFolder?: (parentFolderPath: string) => void
   onDownloadFile?: (path: string) => void
+  onDuplicateFile?: (path: string) => void
+  onDeleteFolder?: (folderPath: string) => void
 }
 
 interface CtxMenu {
@@ -105,6 +107,8 @@ export default function FileTree({
   onNewFileInFolder,
   onCreateFolder,
   onDownloadFile,
+  onDuplicateFile,
+  onDeleteFolder,
 }: FileTreeProps) {
   const tree = buildFileTree(files)
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null)
@@ -192,6 +196,8 @@ export default function FileTree({
               renamingPath={renamingPath}
               setRenamingPath={setRenamingPath}
               canDragDrop={!!onRenameFile}
+              onDuplicateFile={onDuplicateFile}
+              onDeleteFolder={onDeleteFolder}
             />
           ))}
         </ul>
@@ -207,6 +213,11 @@ export default function FileTree({
                 {onRenameFile && (
                   <button style={styles.ctxItem} onClick={() => { setRenamingPath(ctxMenu.node.path); closeMenu() }}>
                     ✎ Rename
+                  </button>
+                )}
+                {onDuplicateFile && (
+                  <button style={styles.ctxItem} onClick={() => { onDuplicateFile(ctxMenu.node.path); closeMenu() }}>
+                    ⧉ Duplicate
                   </button>
                 )}
                 {onDownloadFile && (
@@ -246,6 +257,20 @@ export default function FileTree({
                     <div style={styles.ctxDivider} />
                     <button style={styles.ctxItem} onClick={() => { setRenamingPath(ctxMenu.node.path); closeMenu() }}>
                       ✎ Rename
+                    </button>
+                  </>
+                )}
+                {onDeleteFolder && (
+                  <>
+                    <div style={styles.ctxDivider} />
+                    <button
+                      style={{ ...styles.ctxItem, ...styles.ctxItemDanger }}
+                      onClick={() => {
+                        if (window.confirm(`Delete all files in "${ctxMenu.node.path}"?`)) onDeleteFolder(ctxMenu.node.path)
+                        closeMenu()
+                      }}
+                    >
+                      ✕ Delete All
                     </button>
                   </>
                 )}
@@ -298,6 +323,8 @@ function TreeNode({
   renamingPath,
   setRenamingPath,
   canDragDrop,
+  onDuplicateFile,
+  onDeleteFolder,
 }: {
   node: FileTreeNode
   currentFile: string
@@ -310,6 +337,8 @@ function TreeNode({
   renamingPath: string | null
   setRenamingPath: (path: string | null) => void
   canDragDrop: boolean
+  onDuplicateFile?: (path: string) => void
+  onDeleteFolder?: (path: string) => void
 }) {
   const [expanded, setExpanded] = useState(true)
   const [renameName, setRenameName] = useState('')
@@ -406,6 +435,14 @@ function TreeNode({
                   +
                 </button>
               )}
+              <button
+                className="tree-kebab"
+                style={styles.treeActionBtn}
+                onClick={(e) => { e.stopPropagation(); onContextMenu(e.clientX, e.clientY, node) }}
+                title="More options"
+              >
+                ⋮
+              </button>
             </>
           )}
         </div>
@@ -425,6 +462,8 @@ function TreeNode({
                 renamingPath={renamingPath}
                 setRenamingPath={setRenamingPath}
                 canDragDrop={canDragDrop}
+                onDuplicateFile={onDuplicateFile}
+                onDeleteFolder={onDeleteFolder}
               />
             ))}
           </ul>
@@ -475,18 +514,14 @@ function TreeNode({
           <>
             <span style={styles.fileIcon}>{fileIcon}</span>
             <span style={styles.nodeFileName}>{node.name}</span>
-            {!isMainTex && onDeleteFile && (
-              <button
-                style={styles.treeActionBtn}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  if (window.confirm(`Delete "${node.path}"?`)) onDeleteFile(node.path)
-                }}
-                title="Delete"
-              >
-                ×
-              </button>
-            )}
+            <button
+              className="tree-kebab"
+              style={styles.treeActionBtn}
+              onClick={(e) => { e.stopPropagation(); onContextMenu(e.clientX, e.clientY, node) }}
+              title="More options"
+            >
+              ⋮
+            </button>
           </>
         )}
       </div>

@@ -846,6 +846,40 @@ export default function EditorPage() {
     URL.revokeObjectURL(url)
   }
 
+  // Duplicate file — copies content to "<name>-copy.<ext>"
+  const handleDuplicateFile = useCallback(async (path: string) => {
+    if (!projectId) return
+    const parts = path.split('/')
+    const name = parts[parts.length - 1]
+    const dotIdx = name.lastIndexOf('.')
+    const base = dotIdx > 0 ? name.slice(0, dotIdx) : name
+    const ext = dotIdx > 0 ? name.slice(dotIdx) : ''
+    const newName = `${base}-copy${ext}`
+    const newPath = [...parts.slice(0, -1), newName].join('/')
+    try {
+      const res = await projectsApi.getFile(projectId, path)
+      const text = typeof res.data === 'string' ? res.data : ((res.data as { content?: string })?.content ?? '')
+      await projectsApi.createFile(projectId, newPath, text)
+      queryClient.invalidateQueries({ queryKey: ['files', projectId] })
+      toast.success(`Duplicated to ${newPath}`)
+    } catch {
+      toast.error('Failed to duplicate file')
+    }
+  }, [projectId, queryClient])
+
+  // Delete entire folder — deletes all files whose path starts with folderPath/
+  const handleDeleteFolder = useCallback((folderPath: string) => {
+    if (!projectId || !files) return
+    const toDelete = files.filter((f) => f.path.startsWith(folderPath + '/'))
+    Promise.all(toDelete.map((f) => projectsApi.deleteFile(projectId, f.path)))
+      .then(() => {
+        queryClient.invalidateQueries({ queryKey: ['files', projectId] })
+        toast.success(`Deleted folder "${folderPath}"`)
+        if (toDelete.some((f) => f.path === currentFile)) setCurrentFile('main.tex')
+      })
+      .catch(() => toast.error('Failed to delete folder'))
+  }, [projectId, files, queryClient, currentFile])
+
   // Monaco setup
   const handleEditorBeforeMount: BeforeMount = (monaco) => {
     registerLatexLanguage(monaco)
@@ -1481,6 +1515,8 @@ export default function EditorPage() {
                 onNewFileInFolder={editorRole ? handleNewFileInFolder : undefined}
                 onCreateFolder={editorRole ? handleCreateFolder : undefined}
                 onDownloadFile={handleDownloadFile}
+                onDuplicateFile={editorRole ? handleDuplicateFile : undefined}
+                onDeleteFolder={editorRole ? handleDeleteFolder : undefined}
               />
             )}
             <DocumentOutline
