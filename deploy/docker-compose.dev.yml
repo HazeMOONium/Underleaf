@@ -83,6 +83,8 @@ services:
       - MINIO_BUCKET=underleaf-files
       - RABBITMQ_HOST=rabbitmq
       - RABBITMQ_PORT=5672
+      # Set to the host-accessible MinIO URL so presigned URLs work in dev
+      - MINIO_PUBLIC_URL=http://localhost:19000
     depends_on:
       postgres:
         condition: service_healthy

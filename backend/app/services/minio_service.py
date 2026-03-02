@@ -1,4 +1,5 @@
 import logging
+from datetime import timedelta
 from io import BytesIO
 from typing import Optional
 
@@ -75,6 +76,54 @@ class MinIOService:
         except S3Error as e:
             logger.error(f"Failed to delete file: {e}")
             raise ConnectionError(f"Failed to delete file: {e}")
+
+    def get_presigned_url(self, bucket: str, object_name: str, expires: int = 900) -> str:
+        """Generate a presigned GET URL.
+
+        If ``MINIO_PUBLIC_URL`` is configured, the internal service hostname
+        in the URL is replaced with the public URL so the browser can reach it.
+        """
+        settings = get_settings()
+        url = self.client.presigned_get_object(
+            bucket,
+            object_name,
+            expires=timedelta(seconds=expires),
+        )
+        if settings.MINIO_PUBLIC_URL:
+            scheme = "https" if self._secure else "http"
+            internal = f"{scheme}://{self._endpoint}"
+            url = url.replace(internal, settings.MINIO_PUBLIC_URL.rstrip("/"), 1)
+        return url
+
+    async def get_presigned_url_cached(
+        self,
+        bucket: str,
+        object_name: str,
+        redis_service: "any",  # type: ignore[type-arg]
+    ) -> str:
+        """Return a cached presigned URL, generating a new one on cache miss.
+
+        URLs are cached in Redis for ``PRESIGNED_URL_EXPIRE_SECONDS - 60``
+        seconds to ensure they remain valid when the browser fetches them.
+        """
+        settings = get_settings()
+        expires = settings.PRESIGNED_URL_EXPIRE_SECONDS
+        cache_key = f"presigned:{bucket}/{object_name}"
+        try:
+            cached = await redis_service.get(cache_key)
+            if cached:
+                return cached
+        except Exception as exc:
+            logger.warning("Redis cache miss (presigned URL): %s", exc)
+
+        url = self.get_presigned_url(bucket, object_name, expires=expires)
+
+        try:
+            await redis_service.set(cache_key, url, expire=max(expires - 60, 60))
+        except Exception as exc:
+            logger.warning("Failed to cache presigned URL: %s", exc)
+
+        return url
 
 
 minio_service = MinIOService()

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.api.v1.auth import get_current_user
 from app.api.v1.projects import get_project_with_access
@@ -11,6 +12,7 @@ from app.models.models import CompileJob, JobStatus, ProjectFile, ProjectRole, U
 from app.schemas.compile import CompileJobCreate, CompileJobResponse
 from app.services.minio_service import minio_service
 from app.services.rabbitmq_service import rabbitmq_service, COMPILE_JOBS_QUEUE
+from app.services.redis_service import redis_service
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +136,39 @@ def get_job_artifact(
     except Exception as e:
         logger.error(f"Failed to download artifact for job {job_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve artifact")
+
+
+@router.get("/jobs/{job_id}/artifact-url")
+async def get_job_artifact_url(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return a presigned MinIO URL for the job's PDF artifact.
+
+    Only available when ``MINIO_PUBLIC_URL`` is configured. The URL is cached
+    in Redis for ~14 minutes so repeated calls (e.g. page reload) don't
+    re-sign the same object.
+    """
+    settings = get_settings()
+    if not settings.MINIO_PUBLIC_URL:
+        raise HTTPException(
+            status_code=404,
+            detail="Presigned URLs not configured (MINIO_PUBLIC_URL not set)",
+        )
+
+    job = db.query(CompileJob).filter(CompileJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    get_project_with_access(job.project_id, current_user.id, db)  # type: ignore[misc]
+
+    if not job.artifact_ref:
+        raise HTTPException(status_code=404, detail="No artifact available")
+
+    bucket = minio_service._default_bucket
+    url = await minio_service.get_presigned_url_cached(bucket, job.artifact_ref, redis_service)
+    return {"url": url}
 
 
 @router.get("/jobs/{job_id}/synctex")

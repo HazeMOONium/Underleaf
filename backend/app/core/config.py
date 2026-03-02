@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: str = "minioadmin"
     MINIO_BUCKET: str = "underleaf-files"
     MINIO_SECURE: bool = False
+    # Public URL used in presigned URLs returned to the browser.
+    # Set to the externally reachable MinIO URL, e.g. http://localhost:19000 in dev.
+    # Leave empty to disable presigned URL endpoint (use blob streaming instead).
+    MINIO_PUBLIC_URL: str = ""
+    PRESIGNED_URL_EXPIRE_SECONDS: int = 900  # 15 min validity; cache for 14 min
 
     # AI
     ANTHROPIC_API_KEY: str = ""

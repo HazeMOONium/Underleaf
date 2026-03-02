@@ -166,16 +166,15 @@ request rate, p50/p95/p99 latency, error rate, compile throughput, stat tiles.
 Prometheus (port 19090) and Grafana (port 13000) added to `docker-compose.dev.yml`.
 Grafana auto-provisions the datasource and dashboard on startup.
 
-### Production Docker Compose hardening
+### ~~Production Docker Compose hardening~~ ✅ Done
 
-Review `deploy/docker-compose.prod.yml` for production readiness:
-
-- Non-root users for all containers
-- Read-only filesystem where possible
-- Secret management (Docker secrets or env file encryption)
-- Resource limits (`mem_limit`, `cpu_quota`)
-- Restart policies
-- **Effort**: M (2–3h)
+Created `deploy/docker-compose.prod.yml` with:
+- `restart: always` on all services
+- Non-root users (`user: "1000:1000"` for backend, UID 1001 already in worker Dockerfile)
+- `read_only: true` + tmpfs for PostgreSQL
+- Resource limits (`memory` + `cpus`) on every service
+- Required secrets validated at startup (`${VAR:?msg}` syntax)
+- No source bind mounts (uses pre-built images)
 
 ### Kubernetes Helm chart
 
@@ -200,11 +199,13 @@ For large files (images, fonts > 5MB), use MinIO's multipart upload API instead 
 
 - **Effort**: S (2–3h)
 
-### CDN / object storage presigned URL caching
+### ~~CDN / object storage presigned URL caching~~ ✅ Done
 
-Cache presigned URLs in Redis for the duration of their validity (15 min) to avoid re-signing the same object on every page load.
-
-- **Effort**: S (1–2h)
+`minio_service.get_presigned_url_cached()` caches presigned URLs in Redis for 14 min
+(validity is 15 min) to avoid re-signing on every request. New endpoint
+`GET /compile/jobs/:id/artifact-url` returns `{url}` for direct browser → MinIO streaming.
+Requires `MINIO_PUBLIC_URL` env var; falls back gracefully to blob streaming otherwise.
+Dev compose sets `MINIO_PUBLIC_URL=http://localhost:19000`.
 
 ### Collab server horizontal scaling
 
