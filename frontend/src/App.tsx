@@ -10,6 +10,7 @@ import ForgotPasswordPage from './pages/ForgotPasswordPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
 import VerifyEmailPage from './pages/VerifyEmailPage'
 import ProfilePage from './pages/ProfilePage'
+import OAuthCallbackPage from './pages/OAuthCallbackPage'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { token } = useAuthStore()
@@ -50,6 +51,8 @@ function App() {
       <Route path="/reset-password" element={<ResetPasswordPage />} />
       {/* Public route — no auth required, token comes from the email link */}
       <Route path="/verify-email" element={<VerifyEmailPage />} />
+      {/* OAuth callback — no auth required */}
+      <Route path="/auth/callback" element={<OAuthCallbackPage />} />
       <Route
         path="/profile"
         element={

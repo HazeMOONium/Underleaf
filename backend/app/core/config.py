@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     MINIO_PUBLIC_URL: str = ""
     PRESIGNED_URL_EXPIRE_SECONDS: int = 900  # 15 min validity; cache for 14 min
 
+    # OAuth / SSO
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GITHUB_CLIENT_ID: str = ""
+    GITHUB_CLIENT_SECRET: str = ""
+
     # AI
     ANTHROPIC_API_KEY: str = ""
 

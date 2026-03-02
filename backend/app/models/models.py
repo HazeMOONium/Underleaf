@@ -44,6 +44,9 @@ class User(Base):
     email_verified = Column(Boolean, default=False, nullable=False)
     totp_secret = Column(String, nullable=True)
     totp_enabled = Column(Boolean, default=False, nullable=False)
+    # OAuth / SSO — provider name ('google', 'github') and provider-issued user ID
+    oauth_provider = Column(String, nullable=True)
+    oauth_provider_id = Column(String, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     projects = relationship("Project", back_populates="owner")
