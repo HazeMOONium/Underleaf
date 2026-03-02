@@ -182,8 +182,9 @@ def download_files(job_data: dict) -> None:
         file_path.write_text(content)
 
 
-def run_compile(project_id: str, engine: str = 'pdflatex') -> tuple[bool, str, str]:
+def run_compile(project_id: str, engine: str = 'pdflatex', draft: bool = False) -> tuple[bool, str, str]:
     """Run the LaTeX engine and return (success, error_msg, output_pdf_path)."""
+    import shutil as _shutil
     project_dir = Path(SANDBOX_DIR) / project_id
 
     main_tex = None
@@ -205,14 +206,35 @@ def run_compile(project_id: str, engine: str = 'pdflatex') -> tuple[bool, str, s
         print(f"Unknown engine '{engine}', defaulting to pdflatex")
         engine = 'pdflatex'
 
-    cmd = [
-        engine,
-        '-interaction=nonstopmode',
-        '-halt-on-error',
-        '-synctex=1',
-        f'-output-directory={OUTPUT_DIR}',
-        str(main_tex)
-    ]
+    # Use latexmk when available — handles multi-pass, BibTeX, and index generation
+    use_latexmk = bool(_shutil.which('latexmk'))
+
+    if use_latexmk:
+        engine_flag = {'pdflatex': '-pdf', 'xelatex': '-xelatex', 'lualatex': '-lualatex'}[engine]
+        cmd = [
+            'latexmk',
+            engine_flag,
+            '-interaction=nonstopmode',
+            '-halt-on-error',
+            '-synctex=1',
+            f'-output-directory={OUTPUT_DIR}',
+        ]
+        if draft:
+            cmd.append('-draftmode')
+        cmd.append(str(main_tex))
+    else:
+        cmd = [
+            engine,
+            '-interaction=nonstopmode',
+            '-halt-on-error',
+            '-synctex=1',
+        ]
+        if draft:
+            cmd.append('-draftmode')
+        cmd += [
+            f'-output-directory={OUTPUT_DIR}',
+            str(main_tex),
+        ]
 
     try:
         result = subprocess.run(
@@ -278,7 +300,8 @@ def callback(ch, method, properties, body):
         job_id = job['job_id']
         project_id = job['project_id']
         engine = job.get('engine', 'pdflatex')
-        print(f"Processing job: {job_id} (engine: {engine})")
+        draft = bool(job.get('draft', False))
+        print(f"Processing job: {job_id} (engine: {engine}, draft: {draft})")
 
         # Mark as running in the database
         set_job_running(job_id)
@@ -287,7 +310,7 @@ def callback(ch, method, properties, body):
         download_files(job)
 
         # Run the compilation
-        success, error_msg, artifact_path = run_compile(project_id, engine)
+        success, error_msg, artifact_path = run_compile(project_id, engine, draft)
 
         # Path for the compile log (always try to upload)
         log_file = Path(LOG_DIR) / f"{project_id}.log"

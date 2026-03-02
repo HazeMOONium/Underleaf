@@ -79,8 +79,8 @@ export const projectsApi = {
 }
 
 export const compileApi = {
-  createJob: (projectId: string) =>
-    api.post<CompileJob>('/compile/jobs', { project_id: projectId }),
+  createJob: (projectId: string, draft = false) =>
+    api.post<CompileJob>('/compile/jobs', { project_id: projectId, draft }),
 
   getJob: (jobId: string) => api.get<CompileJob>(`/compile/jobs/${jobId}`),
 

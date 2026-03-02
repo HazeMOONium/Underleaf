@@ -615,7 +615,7 @@ export default function EditorPage() {
   const handleShare = () => setShowCollabModal(true)
 
   const compile = useMutation({
-    mutationFn: () => compileApi.createJob(projectId!),
+    mutationFn: (draft: boolean) => compileApi.createJob(projectId!, draft),
     onMutate: () => {
       setCompiling(true)
       setCompileError(null)
@@ -636,7 +636,7 @@ export default function EditorPage() {
   // Keep compileRef in sync so saveFile.onSuccess can trigger compile
   // without a circular dependency between the two mutations
   compileRef.current = () => {
-    if (editorRole && !compiling) compile.mutate()
+    if (editorRole && !compiling) compile.mutate(false)
   }
 
   const fetchLogs = async (jobId: string): Promise<string> => {
@@ -1192,7 +1192,7 @@ export default function EditorPage() {
           </Link>
           <div style={styles.headerDivider} />
           <h2 style={styles.projectTitle}>{project?.title || 'Loading...'}</h2>
-          {/* Presence dots */}
+          {/* Presence avatars — you + up to 3 peers + overflow count */}
           <div style={styles.presenceBar}>
             <div
               style={{ ...styles.presenceDot, backgroundColor: localUserColor }}
@@ -1200,7 +1200,7 @@ export default function EditorPage() {
             >
               {localUserInitial}
             </div>
-            {connectedUsers.map((u) => (
+            {connectedUsers.slice(0, 3).map((u) => (
               <div
                 key={u.clientId}
                 style={{ ...styles.presenceDot, backgroundColor: u.color }}
@@ -1209,6 +1209,20 @@ export default function EditorPage() {
                 {u.name[0].toUpperCase()}
               </div>
             ))}
+            {connectedUsers.length > 3 && (
+              <div
+                style={{
+                  ...styles.presenceDot,
+                  background: 'rgba(255,255,255,0.18)',
+                  fontSize: '9px',
+                  fontWeight: 700,
+                  color: 'rgba(255,255,255,0.85)',
+                }}
+                title={connectedUsers.slice(3).map((u) => u.name).join(', ')}
+              >
+                +{connectedUsers.length - 3}
+              </div>
+            )}
           </div>
         </div>
         <div style={styles.headerRight}>
@@ -1280,16 +1294,35 @@ export default function EditorPage() {
             </select>
           )}
           {editorRole && (
-            <button
-              className="primary"
-              onClick={() => compile.mutate()}
-              disabled={compiling}
-              style={{ fontSize: '13px' }}
-            >
-              {compiling
-                ? <><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginRight:5,verticalAlign:'middle'}} className="animate-spin"><circle cx="12" cy="12" r="10" strokeOpacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/></svg>Compiling…</>
-                : <><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginRight:5,verticalAlign:'middle'}}><polygon points="5 3 19 12 5 21 5 3"/></svg>Compile</>}
-            </button>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <button
+                style={{
+                  fontSize: '12px',
+                  padding: '6px 10px',
+                  background: 'rgba(255,255,255,0.08)',
+                  border: '1px solid rgba(255,255,255,0.15)',
+                  borderRadius: 'var(--radius-md)',
+                  color: 'rgba(255,255,255,0.75)',
+                  cursor: compiling ? 'not-allowed' : 'pointer',
+                  opacity: compiling ? 0.5 : 1,
+                }}
+                onClick={() => compile.mutate(true)}
+                disabled={compiling}
+                title="Fast syntax check — skips PDF generation"
+              >
+                Draft
+              </button>
+              <button
+                className="primary"
+                onClick={() => compile.mutate(false)}
+                disabled={compiling}
+                style={{ fontSize: '13px' }}
+              >
+                {compiling
+                  ? <><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginRight:5,verticalAlign:'middle'}} className="animate-spin"><circle cx="12" cy="12" r="10" strokeOpacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/></svg>Compiling…</>
+                  : <><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginRight:5,verticalAlign:'middle'}}><polygon points="5 3 19 12 5 21 5 3"/></svg>Compile</>}
+              </button>
+            </div>
           )}
         </div>
       </header>
@@ -1472,7 +1505,7 @@ export default function EditorPage() {
               <button
                 className="primary"
                 style={{ fontSize: '11px', padding: '4px 10px', flexShrink: 0 }}
-                onClick={() => compile.mutate()}
+                onClick={() => compile.mutate(false)}
                 disabled={compiling}
               >
                 {compiling

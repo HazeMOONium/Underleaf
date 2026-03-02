@@ -34,13 +34,13 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         ).observe(duration)
         
         logger.info(
-            f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s",
+            "request",
             extra={
                 "method": request.method,
                 "path": request.url.path,
                 "status": response.status_code,
-                "duration": duration,
-                "request_id": request_id
+                "duration": round(duration * 1000, 1),  # ms
+                "request_id": request_id,
             }
         )
         

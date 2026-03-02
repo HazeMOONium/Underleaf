@@ -23,13 +23,13 @@ Items are grouped by theme and ordered by priority within each group. Effort est
 
 High value, low effort items that can be shipped quickly.
 
-| # | Feature | Effort | Notes |
-|---|---------|--------|-------|
-| 1 | **LaTeX engine selector** | S | Dropdown in editor header: pdflatex / xelatex / lualatex. Store preference per-project in `projects.engine` column. Pass to worker via job message. |
-| 2 | **Word / character count status bar** | S | Read Monaco model text → count words and characters → display in a small status bar below the editor. Update on ytext observe. |
-| 3 | **Join / leave toasts** | XS | Use Yjs awareness change events to detect users joining or leaving. Show a brief `react-hot-toast` notification (e.g. "Alice joined"). |
-| 4 | **New project from template** | S | Add a "From template" button on the dashboard. Provide 3–4 built-in templates (article, beamer, report, CV). Creates the project + uploads template files on select. |
-| 5 | **New folder button in file tree** | XS | Add a folder-plus icon next to "New File". On click: prompt for name → create `<name>/.gitkeep` via existing file endpoint. |
+| # | Feature | Effort | Status |
+|---|---------|--------|--------|
+| 1 | **LaTeX engine selector** | S | ✅ Done — migration 004, engine column, PATCH route, worker reads engine |
+| 2 | **Word / character count status bar** | S | ✅ Done — 22px status bar below Monaco, updates on ytext observe |
+| 3 | **Join / leave toasts** | XS | ✅ Done — awareness change handler, tracks names, react-hot-toast |
+| 4 | **New project from template** | S | ✅ Done — 4 templates (article, beamer, report, CV), modal on dashboard |
+| 5 | **New folder button in file tree** | XS | ✅ Done — folder-plus button in sidebar header, modal prompt |
 
 ---
 
@@ -44,16 +44,9 @@ Integrate `nspell` (hunspell-compatible JS) for English spell checking in Monaco
 - Language selector (en-US / en-GB / de / fr / es) stored in user profile
 - **Effort**: M (3–4h)
 
-### Enhanced LaTeX diagnostics
+### ~~Enhanced LaTeX diagnostics~~ ✅ Done
 
-Extend the existing LaTeX language registration with more Monaco markers:
-
-- Unmatched `\begin{...}` / `\end{...}` environments
-- Missing `\end{document}`
-- `$$` / `$` without closing pair
-- Unknown commands (via configurable known-command list)
-- Duplicate `\label` definitions
-- **Effort**: M (3–4h)
+Duplicate `\label` detection added to `registerLatexDiagnostics`. Existing checks already covered: unmatched `\begin/\end`, missing `\end{document}`, unclosed `$$`/`$`.
 
 ### File/folder context menu
 
@@ -101,12 +94,9 @@ Send email notifications when:
 - Requires email service to be configured (SMTP env vars)
 - **Effort**: M (3–4h)
 
-### Presence improvements
+### ~~Presence improvements~~ ✅ Done
 
-- Show a list of active collaborators in the editor header (avatars with initials)
-- Display "X users online" when > 3 collaborators
-- Per-file awareness (show who is viewing which file)
-- **Effort**: S (2–3h)
+Presence bar capped at 3 peer avatars + overflow `+N` badge with tooltip listing hidden names.
 
 ---
 
@@ -154,14 +144,9 @@ Current architecture: one worker container, cold start per job. Improve:
 - Scale pool based on queue depth (auto-scaling via Docker API or Kubernetes HPA)
 - **Effort**: L (8–12h)
 
-### Compile with bibliography (latexmk)
+### ~~Compile with bibliography (latexmk)~~ ✅ Done
 
-Replace single `pdflatex` invocation with `latexmk -pdf`:
-
-- Automatically handles multiple passes, BibTeX, and index generation
-- More reliable for complex documents with citations and cross-references
-- Add `-bibtex` flag and multi-pass configuration
-- **Effort**: S (1–2h)
+Worker detects `latexmk` availability at runtime (`shutil.which`) and uses it when present (`-pdf`/`-xelatex`/`-lualatex` flags). Falls back to direct engine invocation otherwise.
 
 ### Compile error linking to files
 
@@ -171,24 +156,17 @@ Currently partial — implement full resolution for multi-file projects.
 
 - **Effort**: S (2–3h)
 
-### Draft / fast compile mode
+### ~~Draft / fast compile mode~~ ✅ Done
 
-Add a "Draft compile" option that runs pdflatex with `-draftmode` (skips PDF generation) for fast syntax checking, then a full compile when the user wants the PDF.
-
-- **Effort**: XS (< 1h)
+"Draft" button added to editor header — sends `draft: true` flag, worker passes `-draftmode` to the engine for fast syntax checking without PDF generation.
 
 ---
 
 ## Infrastructure & DevOps
 
-### Structured JSON logging
+### ~~Structured JSON logging~~ ✅ Done
 
-Replace the current request logger with structured JSON logs:
-
-- Include `request_id`, `user_id`, `method`, `path`, `status`, `duration_ms`
-- Use `structlog` or Python's `logging` with `json_formatter`
-- Enables Loki / Elasticsearch ingestion
-- **Effort**: S (1–2h)
+`JSONFormatter` emits all extra fields as top-level JSON keys (`method`, `path`, `status`, `duration` ms, `request_id`). `LoggingMiddleware` logs a clean `"request"` message with structured extras.
 
 ### Prometheus metrics dashboard
 
@@ -223,13 +201,9 @@ For teams wanting to deploy to Kubernetes:
 
 ## Performance & scalability
 
-### Backend connection pooling
+### ~~Backend connection pooling~~ ✅ Done
 
-Switch from per-request SQLAlchemy connections to a properly sized pool:
-
-- Configure `pool_size`, `max_overflow`, `pool_pre_ping`
-- Add `asyncpg` pool stats to Prometheus metrics
-- **Effort**: XS (< 1h)
+`database.py` now uses `pool_size=10`, `max_overflow=20`, `pool_timeout=30`, `pool_pre_ping=True`.
 
 ### MinIO multipart uploads
 
@@ -296,3 +270,14 @@ For reference, major features already shipped:
 - Health (`/health`) and readiness (`/ready`) endpoints
 - GitHub Actions CI (backend pytest + black + flake8; frontend tsc + eslint)
 - 138-test backend test suite covering all API surface areas
+- **LaTeX engine selector** — pdflatex / xelatex / lualatex per project (migration 004)
+- **Word / character count status bar** — live counts below Monaco editor
+- **Join / leave toasts** — react-hot-toast on collaborator join/leave via Yjs awareness
+- **New project from template** — 4 built-in templates on dashboard
+- **New folder button** — folder-plus in sidebar, `.gitkeep` pattern
+- **latexmk integration** — worker uses latexmk when available, falls back to direct engine
+- **Draft compile mode** — "Draft" button in header, `-draftmode` flag skips PDF generation
+- **Duplicate `\label` diagnostics** — Monaco squiggle for duplicate label keys
+- **Presence overflow badge** — `+N` avatar badge when >3 collaborators online
+- **Structured JSON logging** — all request fields as top-level JSON keys (`method`, `path`, `status`, `duration`)
+- **SQLAlchemy connection pool** — `pool_size=10`, `max_overflow=20`, `pool_timeout=30`

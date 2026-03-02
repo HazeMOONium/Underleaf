@@ -5,6 +5,7 @@ from datetime import datetime
 
 class CompileJobCreate(BaseModel):
     project_id: str
+    draft: Optional[bool] = False
 
 
 class CompileJobResponse(BaseModel):

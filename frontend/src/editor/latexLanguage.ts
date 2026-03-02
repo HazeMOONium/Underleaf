@@ -19,6 +19,8 @@ export function registerLatexDiagnostics(
 
     // Track \begin{env} stack: { env, line (1-based), col (1-based) }
     const beginStack: Array<{ env: string; line: number; col: number }> = []
+    // Track \label{key} definitions for duplicate detection
+    const labelDefs = new Map<string, Array<{ line: number; col: number }>>()
     let hasEndDocument = false
     let inMathDisplay = false // $$ ... $$
     let mathDisplayStartLine = -1
@@ -59,6 +61,20 @@ export function registerLatexDiagnostics(
           startColumn: 1,
           endColumn: line.length + 1,
         })
+      }
+
+      // Track \label{key} occurrences for duplicate detection
+      const labelRe = /\\label\{([^}]+)\}/g
+      let lm: RegExpExecArray | null
+      while ((lm = labelRe.exec(line)) !== null) {
+        const key = lm[1]
+        const col = lm.index + 1
+        const existing = labelDefs.get(key)
+        if (existing) {
+          existing.push({ line: lineNum, col })
+        } else {
+          labelDefs.set(key, [{ line: lineNum, col }])
+        }
       }
 
       // Check \begin{env}
@@ -119,6 +135,21 @@ export function registerLatexDiagnostics(
         endColumn: unclosed.col + `\\begin{${unclosed.env}}`.length,
       })
     }
+
+    // Duplicate \label definitions
+    labelDefs.forEach((occurrences, key) => {
+      if (occurrences.length < 2) return
+      for (const occ of occurrences) {
+        markers.push({
+          severity: monaco.MarkerSeverity.Warning,
+          message: `Duplicate \\label{${key}} — defined ${occurrences.length} times`,
+          startLineNumber: occ.line,
+          endLineNumber: occ.line,
+          startColumn: occ.col,
+          endColumn: occ.col + `\\label{${key}}`.length,
+        })
+      }
+    })
 
     // Missing \end{document}
     if (!hasEndDocument && lines.some((l) => /\\begin\{document\}/.test(l))) {
