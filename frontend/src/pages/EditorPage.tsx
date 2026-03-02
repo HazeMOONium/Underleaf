@@ -54,6 +54,30 @@ interface LogIssue {
   message: string
 }
 
+/**
+ * Resolves a file path from pdflatex log output (e.g. `./sections/intro.tex`)
+ * to an actual project file path (e.g. `sections/intro.tex`).
+ * Strategy: strip `./` → exact match → suffix match → basename match → raw.
+ */
+function resolveLogFilePath(logPath: string, projectFiles: { path: string }[]): string {
+  const normalized = logPath.replace(/^\.\//, '')
+  // Exact match
+  if (projectFiles.find(f => f.path === normalized)) return normalized
+  // Suffix match (e.g. log says `intro.tex`, project has `sections/intro.tex`)
+  let best: string | null = null
+  let bestLen = 0
+  for (const f of projectFiles) {
+    if (f.path === normalized || f.path.endsWith('/' + normalized)) {
+      if (f.path.length > bestLen) { bestLen = f.path.length; best = f.path }
+    }
+  }
+  if (best) return best
+  // Basename match as last resort
+  const base = normalized.split('/').pop() ?? normalized
+  const byBase = projectFiles.find(f => f.path === base || f.path.endsWith('/' + base))
+  return byBase?.path ?? normalized
+}
+
 function parseLatexLog(log: string): LogIssue[] {
   const lines = log.split('\n')
   const issues: LogIssue[] = []
@@ -65,18 +89,18 @@ function parseLatexLog(log: string): LogIssue[] {
   while (lineIdx < lines.length) {
     const line = lines[lineIdx]
 
-    // Track file context: `(./foo.tex` pushes a file
-    const fileOpenMatch = line.match(/\(\.\/([\w/.-]+\.(?:tex|bib|cls|sty))/i)
+    // Track file context: `(./foo.tex` or `(sections/foo.tex` pushes a file
+    const fileOpenMatch = line.match(/\(\.?\/?(?:\.\/)?([a-zA-Z0-9_/.-]+\.(?:tex|bib|cls|sty))/i)
     if (fileOpenMatch) {
-      fileStack.push(fileOpenMatch[1])
+      fileStack.push(fileOpenMatch[1].replace(/^\.\//, ''))
     }
     // Leading `)` may pop the stack (heuristic)
     if (/^\)/.test(line) && fileStack.length > 1) {
       fileStack.pop()
     }
 
-    // Pattern: `./file.tex:N: message`
-    const fileLineMatch = line.match(/^\.\/([\w/.-]+\.tex):(\d+):\s*(.+)/)
+    // Pattern: `./file.tex:N: message` or `file.tex:N: message`
+    const fileLineMatch = line.match(/^\.?\/?([a-zA-Z0-9_/.-]+\.tex):(\d+):\s*(.+)/)
     if (fileLineMatch) {
       issues.push({
         type: 'error',
@@ -1916,7 +1940,8 @@ export default function EditorPage() {
                                 style={styles.issueItem}
                                 onClick={() => {
                                   if (issue.line > 0) {
-                                    if (issue.file !== currentFile) setCurrentFile(issue.file)
+                                    const resolvedFile = resolveLogFilePath(issue.file, files ?? [])
+                                    if (resolvedFile !== currentFile) setCurrentFile(resolvedFile)
                                     setTimeout(() => {
                                       editorRef.current?.revealLineInCenter(issue.line)
                                       editorRef.current?.setPosition({ lineNumber: issue.line, column: 1 })
