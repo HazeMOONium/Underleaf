@@ -57,17 +57,17 @@ Replace the current inline rename/delete buttons with a right-click context menu
 - Custom lightweight dropdown — no heavy library required
 - **Effort**: M (2–3h)
 
-### Multi-cursor find & replace
+### ~~Multi-cursor find & replace~~ ✅ Done
 
-Expose Monaco's built-in find/replace widget with a keyboard shortcut (Ctrl+H) and project-wide file search (Ctrl+Shift+F) across all project files.
+Ctrl+H opens Monaco's built-in find/replace widget. Ctrl+Shift+F opens a custom project-wide
+search overlay — searches all `.tex/.bib/.sty` files, shows file:line:preview results,
+click to navigate. Also reachable from the command added in `handleEditorMount`.
 
-- **Effort**: S (1–2h)
+### ~~Vim / Emacs keybindings~~ ✅ Done
 
-### Vim / Emacs keybindings
-
-Add a keybinding mode selector in user preferences. Monaco has built-in support for `monaco-vim` and `monaco-emacs` packages.
-
-- **Effort**: S (1–2h)
+Keybinding mode selector (Normal / Vim / Emacs) in the editor header. Preference persisted
+in localStorage. Vim mode uses `monaco-vim` with a status bar indicator in the footer.
+Emacs mode uses `monaco-emacs`.
 
 ---
 

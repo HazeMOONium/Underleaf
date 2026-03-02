@@ -15,6 +15,8 @@
     "@monaco-editor/react": "^4.6.0",
     "@tanstack/react-query": "^5.17.0",
     "axios": "^1.6.7",
+    "monaco-emacs": "^0.3.0",
+    "monaco-vim": "^0.4.4",
     "pdfjs-dist": "^5.4.624",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",

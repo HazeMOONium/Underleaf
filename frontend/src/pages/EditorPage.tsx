@@ -3,6 +3,12 @@ import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react'
 import type * as Monaco from 'monaco-editor'
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore — no bundled types
+import { initVimMode } from 'monaco-vim'
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore — no bundled types
+import { EmacsExtension } from 'monaco-emacs'
 import * as Y from 'yjs'
 import { WebsocketProvider } from 'y-websocket'
 import { MonacoBinding } from 'y-monaco'
@@ -163,6 +169,19 @@ export default function EditorPage() {
   const [wordCount, setWordCount] = useState(0)
   const [charCount, setCharCount] = useState(0)
 
+  // Keybinding mode selector
+  type KeybindingMode = 'normal' | 'vim' | 'emacs'
+  const [keybindingMode, setKeybindingMode] = useState<KeybindingMode>(
+    () => (localStorage.getItem('keybindingMode') as KeybindingMode | null) ?? 'normal',
+  )
+
+  // Project-wide search panel
+  interface SearchResult { file: string; line: number; col: number; preview: string }
+  const [showSearchPanel, setShowSearchPanel] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([])
+  const [searchLoading, setSearchLoading] = useState(false)
+
   // Feature A: structured log parsing
   const [issuesExpanded, setIssuesExpanded] = useState(true)
 
@@ -199,6 +218,8 @@ export default function EditorPage() {
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
   const latexDiagnosticsCleanupRef = useRef<(() => void) | null>(null)
   const remoteDecorationsRef = useRef<Monaco.editor.IEditorDecorationsCollection | null>(null)
+  const keybindingCleanupRef = useRef<() => void>(() => {})
+  const vimStatusBarRef = useRef<HTMLDivElement | null>(null)
 
   // Yjs document and provider — live for the lifetime of the project page
   const ydocRef = useRef<Y.Doc | null>(null)
@@ -937,6 +958,11 @@ export default function EditorPage() {
       newFileRef.current()
     })
 
+    // Ctrl+Shift+F — project-wide search panel
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF, () => {
+      setShowSearchPanel((v) => !v)
+    })
+
     // Signal that the editor is ready — triggers the per-file binding effect
     setEditorMounted(true)
   }
@@ -1083,6 +1109,64 @@ export default function EditorPage() {
 
   // Memoized outline
   const outlineContent = useMemo(() => content, [content])
+
+  // ── Keybinding mode — vim / emacs / normal ────────────────────────────────
+  useEffect(() => {
+    localStorage.setItem('keybindingMode', keybindingMode)
+    if (!editorMounted || !editorRef.current) return
+
+    // Dispose the previous mode
+    keybindingCleanupRef.current()
+    keybindingCleanupRef.current = () => {}
+
+    const editor = editorRef.current
+    if (keybindingMode === 'vim' && vimStatusBarRef.current) {
+      const vim = initVimMode(editor, vimStatusBarRef.current)
+      keybindingCleanupRef.current = () => vim.dispose()
+    } else if (keybindingMode === 'emacs') {
+      const emacs = new EmacsExtension(editor)
+      emacs.start()
+      keybindingCleanupRef.current = () => emacs.dispose()
+    }
+  }, [keybindingMode, editorMounted])
+
+  // ── Project-wide search (Ctrl+Shift+F) ───────────────────────────────────
+  const runProjectSearch = useCallback(async (query: string) => {
+    if (!query.trim() || !files || !projectId) { setSearchResults([]); return }
+    setSearchLoading(true)
+    const results: SearchResult[] = []
+    try {
+      await Promise.all(
+        files
+          .filter((f) => f.path.match(/\.(tex|bib|sty|cls|txt|md)$/))
+          .map(async (f) => {
+            try {
+              const res = await projectsApi.getFile(projectId, f.path)
+              const text = typeof res.data === 'string'
+                ? res.data
+                : ((res.data as { content?: string })?.content ?? '')
+              const fileLines = text.split('\n')
+              const lq = query.toLowerCase()
+              fileLines.forEach((line, idx) => {
+                const col = line.toLowerCase().indexOf(lq)
+                if (col !== -1) {
+                  results.push({
+                    file: f.path,
+                    line: idx + 1,
+                    col: col + 1,
+                    preview: line.trim().slice(0, 80),
+                  })
+                }
+              })
+            } catch { /* skip inaccessible files */ }
+          }),
+      )
+    } finally {
+      setSearchLoading(false)
+    }
+    results.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line)
+    setSearchResults(results)
+  }, [files, projectId])
 
   // ── Feature A: parsed log issues ─────────────────────────────────────────
   const logIssues = useMemo(() => (compileLogs ? parseLatexLog(compileLogs) : []), [compileLogs])
@@ -1268,6 +1352,26 @@ export default function EditorPage() {
                 : <><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginRight:5,verticalAlign:'middle'}}><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save</>}
             </button>
           )}
+          {/* Keybinding mode selector */}
+          <select
+            value={keybindingMode}
+            onChange={(e) => setKeybindingMode(e.target.value as KeybindingMode)}
+            title="Editor keybinding mode"
+            style={{
+              background: 'rgba(255,255,255,0.08)',
+              border: '1px solid rgba(255,255,255,0.15)',
+              borderRadius: 'var(--radius-md)',
+              color: '#fff',
+              fontSize: '12px',
+              padding: '5px 8px',
+              cursor: 'pointer',
+              outline: 'none',
+            }}
+          >
+            <option value="normal">Normal</option>
+            <option value="vim">Vim</option>
+            <option value="emacs">Emacs</option>
+          </select>
           {editorRole && (
             <select
               value={engine}
@@ -1394,7 +1498,64 @@ export default function EditorPage() {
         </aside>
 
         {/* ── Editor ───────────────────────────────────────────────────── */}
-        <div style={{ ...styles.editor, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ ...styles.editor, display: 'flex', flexDirection: 'column', position: 'relative' }}>
+          {/* Project-wide search overlay (Ctrl+Shift+F) */}
+          {showSearchPanel && (
+            <div
+              style={{
+                position: 'absolute', top: 0, right: 0, zIndex: 50,
+                width: '380px', maxHeight: '70%',
+                background: 'var(--color-bg)', border: '1px solid var(--color-border)',
+                borderRadius: '0 0 0 var(--radius-md)', boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
+                display: 'flex', flexDirection: 'column', overflow: 'hidden',
+              }}
+              onKeyDown={(e) => { if (e.key === 'Escape') { setShowSearchPanel(false); editorRef.current?.focus() } }}
+            >
+              <div style={{ padding: '10px 12px', borderBottom: '1px solid var(--color-border)', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0, opacity: 0.5 }}><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input
+                  autoFocus
+                  placeholder="Search in project files…"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') runProjectSearch(searchQuery) }}
+                  style={{
+                    flex: 1, background: 'transparent', border: 'none', outline: 'none',
+                    fontSize: '13px', color: 'var(--color-text)',
+                  }}
+                />
+                {searchLoading && <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin"><circle cx="12" cy="12" r="10" strokeOpacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/></svg>}
+                <button onClick={() => { setShowSearchPanel(false); editorRef.current?.focus() }} style={{ background: 'none', border: 'none', cursor: 'pointer', opacity: 0.5, padding: '2px', color: 'inherit' }}>✕</button>
+              </div>
+              {searchResults.length > 0 && (
+                <div style={{ overflowY: 'auto', fontSize: '12px' }}>
+                  {searchResults.map((r, i) => (
+                    <div
+                      key={i}
+                      style={{ padding: '6px 12px', cursor: 'pointer', borderBottom: '1px solid var(--color-border)', display: 'flex', flexDirection: 'column', gap: '2px' }}
+                      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--color-hover)' }}
+                      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = '' }}
+                      onClick={() => {
+                        if (r.file !== currentFile) { setCurrentFile(r.file) }
+                        setTimeout(() => handleOutlineNavigate(r.line), r.file !== currentFile ? 150 : 0)
+                        setShowSearchPanel(false)
+                        editorRef.current?.focus()
+                      }}
+                    >
+                      <span style={{ color: 'var(--color-brand)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.file}:{r.line}</span>
+                      <span style={{ opacity: 0.65, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.preview}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!searchLoading && searchQuery && searchResults.length === 0 && (
+                <div style={{ padding: '16px 12px', fontSize: '12px', opacity: 0.5, textAlign: 'center' }}>No results for &ldquo;{searchQuery}&rdquo;</div>
+              )}
+              {!searchQuery && (
+                <div style={{ padding: '12px', fontSize: '12px', opacity: 0.45, textAlign: 'center' }}>Press Enter to search</div>
+              )}
+            </div>
+          )}
           <div style={{ flex: 1, minHeight: 0 }}>
             <Editor
               height="100%"
@@ -1417,14 +1578,15 @@ export default function EditorPage() {
               }}
             />
           </div>
-          {/* Status bar — word / char count */}
+          {/* Status bar — vim mode indicator + word / char count */}
           <div style={{
             height: '22px',
             background: 'var(--color-header-bg)',
             borderTop: '1px solid rgba(255,255,255,0.08)',
             display: 'flex',
             alignItems: 'center',
-            justifyContent: 'flex-end',
+            justifyContent: 'space-between',
+            paddingLeft: '8px',
             paddingRight: '16px',
             gap: '16px',
             fontSize: '11px',
@@ -1432,8 +1594,13 @@ export default function EditorPage() {
             fontFamily: 'var(--font-mono)',
             flexShrink: 0,
           }}>
-            <span>{wordCount.toLocaleString()} words</span>
-            <span>{charCount.toLocaleString()} chars</span>
+            {/* vim status bar target — monaco-vim renders mode text here */}
+            <div ref={vimStatusBarRef} style={{ color: 'rgba(255,255,255,0.7)', minWidth: 60 }} />
+            <div style={{ display: 'flex', gap: '16px', marginLeft: 'auto' }}>
+              <span style={{ opacity: 0.3 }}>Ctrl+Shift+F to search</span>
+              <span>{wordCount.toLocaleString()} words</span>
+              <span>{charCount.toLocaleString()} chars</span>
+            </div>
           </div>
         </div>
 
