@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from io import BytesIO
@@ -18,6 +19,10 @@ RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'localhost')
 RABBITMQ_PORT = int(os.getenv('RABBITMQ_PORT', 5672))
 RABBITMQ_USER = os.getenv('RABBITMQ_USER', 'guest')
 RABBITMQ_PASSWORD = os.getenv('RABBITMQ_PASSWORD', 'guest')
+
+# Number of concurrent worker threads (pre-warmed pool size).
+# Each thread maintains its own RabbitMQ connection so they can consume jobs in parallel.
+WORKER_CONCURRENCY = int(os.getenv('WORKER_CONCURRENCY', '2'))
 
 # ---------- PostgreSQL config ----------
 POSTGRES_HOST = os.getenv('POSTGRES_HOST', 'localhost')
@@ -182,10 +187,18 @@ def download_files(job_data: dict) -> None:
         file_path.write_text(content)
 
 
-def run_compile(project_id: str, engine: str = 'pdflatex', draft: bool = False) -> tuple[bool, str, str]:
-    """Run the LaTeX engine and return (success, error_msg, output_pdf_path)."""
+def run_compile(job_id: str, project_id: str, engine: str = 'pdflatex', draft: bool = False) -> tuple[bool, str, str]:
+    """Run the LaTeX engine and return (success, error_msg, output_pdf_path).
+
+    Output files are placed in a job-scoped directory (OUTPUT_DIR/{job_id}/)
+    so concurrent workers never overwrite each other's artefacts.
+    """
     import shutil as _shutil
     project_dir = Path(SANDBOX_DIR) / project_id
+    # Per-job output directory prevents races between concurrent workers
+    job_output_dir = Path(OUTPUT_DIR) / job_id
+    job_output_dir.mkdir(parents=True, exist_ok=True)
+    log_file = Path(LOG_DIR) / f"{job_id}.log"
 
     main_tex = None
     for tex_file in project_dir.glob('*.tex'):
@@ -195,10 +208,8 @@ def run_compile(project_id: str, engine: str = 'pdflatex', draft: bool = False) 
     if not main_tex:
         return False, "No .tex file found", ""
 
-    # Engine names the output after the .tex file stem, not the project_id
     tex_stem = main_tex.stem
-    output_pdf = Path(OUTPUT_DIR) / f"{tex_stem}.pdf"
-    log_file = Path(LOG_DIR) / f"{project_id}.log"
+    output_pdf = job_output_dir / f"{tex_stem}.pdf"
 
     # Validate and default the engine
     valid_engines = {'pdflatex', 'xelatex', 'lualatex'}
@@ -217,7 +228,7 @@ def run_compile(project_id: str, engine: str = 'pdflatex', draft: bool = False) 
             '-interaction=nonstopmode',
             '-halt-on-error',
             '-synctex=1',
-            f'-output-directory={OUTPUT_DIR}',
+            f'-output-directory={job_output_dir}',
         ]
         if draft:
             cmd.append('-draftmode')
@@ -232,7 +243,7 @@ def run_compile(project_id: str, engine: str = 'pdflatex', draft: bool = False) 
         if draft:
             cmd.append('-draftmode')
         cmd += [
-            f'-output-directory={OUTPUT_DIR}',
+            f'-output-directory={job_output_dir}',
             str(main_tex),
         ]
 
@@ -256,7 +267,6 @@ def run_compile(project_id: str, engine: str = 'pdflatex', draft: bool = False) 
             return False, error_msg[:500], ""
 
     except subprocess.TimeoutExpired:
-        # Still try to write whatever logs we have
         try:
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_file.write_text(f"Compilation timed out after {COMPILE_TIMEOUT}s\n")
@@ -268,23 +278,20 @@ def run_compile(project_id: str, engine: str = 'pdflatex', draft: bool = False) 
 
 
 # ---------- Cleanup ----------
-def cleanup_job(project_id: str) -> None:
+def cleanup_job(job_id: str, project_id: str) -> None:
     """Remove sandbox, output, and log files for this job."""
+    # Remove sandbox source files
     project_dir = Path(SANDBOX_DIR) / project_id
     if project_dir.exists():
         shutil.rmtree(project_dir, ignore_errors=True)
 
-    # Clean output dir (all files, since pdflatex may create .aux, .log, etc.)
-    output_dir = Path(OUTPUT_DIR)
-    if output_dir.exists():
-        for child in output_dir.iterdir():
-            try:
-                child.unlink()
-            except Exception:
-                pass
+    # Remove the per-job output directory (scoped to job_id, safe for concurrency)
+    job_output_dir = Path(OUTPUT_DIR) / job_id
+    if job_output_dir.exists():
+        shutil.rmtree(job_output_dir, ignore_errors=True)
 
-    # Clean log file for this project
-    log_file = Path(LOG_DIR) / f"{project_id}.log"
+    # Remove the per-job log file
+    log_file = Path(LOG_DIR) / f"{job_id}.log"
     if log_file.exists():
         try:
             log_file.unlink()
@@ -309,11 +316,11 @@ def callback(ch, method, properties, body):
         # Download source files into sandbox
         download_files(job)
 
-        # Run the compilation
-        success, error_msg, artifact_path = run_compile(project_id, engine, draft)
+        # Run the compilation (output scoped to job_id for concurrency safety)
+        success, error_msg, artifact_path = run_compile(job_id, project_id, engine, draft)
 
-        # Path for the compile log (always try to upload)
-        log_file = Path(LOG_DIR) / f"{project_id}.log"
+        # Path for the compile log (per-job, safe for concurrent workers)
+        log_file = Path(LOG_DIR) / f"{job_id}.log"
         logs_ref = None
 
         # Upload logs to MinIO if the file exists
@@ -377,7 +384,7 @@ def callback(ch, method, properties, body):
             print(f"Job {job_id} failed: {error_msg}")
 
         ch.basic_ack(delivery_tag=method.delivery_tag)
-        cleanup_job(project_id)
+        cleanup_job(job_id, project_id)
 
     except Exception as e:
         print(f"Error processing job: {e}")
@@ -389,26 +396,16 @@ def callback(ch, method, properties, body):
                 error_message=f"Unexpected worker error: {str(e)[:400]}",
             )
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-        # Clean up if we know the project_id
-        if job and 'project_id' in job:
-            cleanup_job(job['project_id'])
+        # Clean up if we know the IDs
+        if job and 'job_id' in job and 'project_id' in job:
+            cleanup_job(job['job_id'], job['project_id'])
 
 
-# ---------- Main entry point ----------
-def main():
-    global minio_client
-
-    # Initialize MinIO client (retry on startup)
-    print("Initializing MinIO client...")
-    minio_client = init_minio()
-
-    # Verify PostgreSQL connectivity on startup
-    print("Verifying PostgreSQL connectivity...")
-    conn = connect_postgres()
-    conn.close()
-    print("PostgreSQL connection verified")
-
-    # Connect to RabbitMQ and start consuming
+# ---------- Per-thread consumer ----------
+def run_consumer(worker_id: int) -> None:
+    """A single pre-warmed consumer thread.  Each thread has its own RabbitMQ
+    connection so it can block independently on channel.start_consuming()."""
+    print(f"[worker-{worker_id}] Starting consumer thread")
     while True:
         try:
             credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
@@ -426,18 +423,49 @@ def main():
 
             channel = connection.channel()
             channel.queue_declare(queue='compile_jobs', durable=True)
+            # prefetch_count=1 ensures fair dispatch: this thread only gets
+            # one unacked job at a time, allowing other threads to take new jobs.
             channel.basic_qos(prefetch_count=1)
             channel.basic_consume(queue='compile_jobs', on_message_callback=callback)
 
-            print('Worker started. Waiting for jobs...')
-
+            print(f"[worker-{worker_id}] Waiting for jobs...")
             channel.start_consuming()
         except KeyboardInterrupt:
-            print('Worker stopped by user')
+            print(f"[worker-{worker_id}] Stopped by user")
             break
         except Exception as e:
-            print(f"Connection error: {e}. Reconnecting in 5 seconds...")
+            print(f"[worker-{worker_id}] Connection error: {e}. Reconnecting in 5s...")
             time.sleep(5)
+
+
+# ---------- Main entry point ----------
+def main():
+    global minio_client
+
+    # Initialize MinIO client (retry on startup)
+    print("Initializing MinIO client...")
+    minio_client = init_minio()
+
+    # Verify PostgreSQL connectivity on startup
+    print("Verifying PostgreSQL connectivity...")
+    conn = connect_postgres()
+    conn.close()
+    print("PostgreSQL connection verified")
+
+    print(f"Starting pre-warmed worker pool with {WORKER_CONCURRENCY} thread(s)...")
+
+    threads = []
+    for i in range(WORKER_CONCURRENCY):
+        t = threading.Thread(target=run_consumer, args=(i,), daemon=True, name=f"worker-{i}")
+        t.start()
+        threads.append(t)
+
+    # Keep the main thread alive; daemon threads exit automatically when main exits
+    try:
+        for t in threads:
+            t.join()
+    except KeyboardInterrupt:
+        print("Main thread interrupted — shutting down")
 
 
 if __name__ == '__main__':

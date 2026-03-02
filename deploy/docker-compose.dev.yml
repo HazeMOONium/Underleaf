@@ -141,8 +141,13 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=underleaf-files
+      # Pool size: each thread holds its own RabbitMQ connection and consumes
+      # one job at a time. Set to 1 for serial dev, higher for load testing.
+      - WORKER_CONCURRENCY=2
     volumes:
       - worker_sandbox:/sandbox
+      - worker_output:/output
+      - worker_logs:/logs
 
   frontend:
     image: node:20-alpine
@@ -199,6 +204,8 @@ volumes:
   minio_data:
   rabbitmq_data:
   worker_sandbox:
+  worker_output:
+  worker_logs:
   collab_node_modules:
   frontend_node_modules:
   prometheus_data:
