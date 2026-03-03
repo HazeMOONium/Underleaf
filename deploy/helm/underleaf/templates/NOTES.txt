@@ -1,0 +1,65 @@
+Underleaf has been deployed!
+
+===========================================================================
+  Access your Underleaf instance
+===========================================================================
+
+{{- if .Values.ingress.enabled }}
+  URL: http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
+
+  Make sure your DNS record for {{ .Values.ingress.host }} points to the
+  nginx ingress controller external IP.
+
+  To get the ingress controller IP:
+    kubectl get svc -n ingress-nginx ingress-nginx-controller
+
+{{- else }}
+  Ingress is disabled. To access the frontend, forward the port:
+    kubectl port-forward svc/{{ include "underleaf.fullname" . }}-frontend 8080:80
+  Then open: http://localhost:8080
+{{- end }}
+
+===========================================================================
+  Service endpoints (cluster-internal)
+===========================================================================
+
+  Backend API :  http://{{ include "underleaf.fullname" . }}-backend:8000
+  Collab (WS) :  ws://{{ include "underleaf.fullname" . }}-collab:1234
+  Frontend    :  http://{{ include "underleaf.fullname" . }}-frontend:80
+  PostgreSQL  :  {{ include "underleaf.fullname" . }}-postgres:5432
+  Redis       :  {{ include "underleaf.fullname" . }}-redis:6379
+  MinIO API   :  http://{{ include "underleaf.fullname" . }}-minio:9000
+  MinIO UI    :  http://{{ include "underleaf.fullname" . }}-minio:9001
+  RabbitMQ    :  {{ include "underleaf.fullname" . }}-rabbitmq:5672
+
+===========================================================================
+  Credentials
+===========================================================================
+
+  All credentials are stored in the Kubernetes secret:
+    {{ include "underleaf.fullname" . }}-secret
+
+  To retrieve the backend secret key:
+    kubectl get secret {{ include "underleaf.fullname" . }}-secret \
+      -o jsonpath='{.data.secret-key}' | base64 -d
+
+  IMPORTANT: Before going to production, set strong values in a custom
+  values.yaml or via --set flags:
+    --set backend.env.secretKey=<openssl rand -hex 32>
+    --set postgresql.auth.password=<strong-password>
+    --set minio.auth.rootPassword=<strong-password>
+    --set rabbitmq.auth.password=<strong-password>
+
+===========================================================================
+  Database migrations
+===========================================================================
+
+  Migrations run automatically via an init container on the backend pod.
+  Check migration status:
+    kubectl logs -l app.kubernetes.io/component=backend -c migrate
+
+===========================================================================
+  Monitoring
+===========================================================================
+
+  Prometheus metrics: http://{{ include "underleaf.fullname" . }}-backend:8000/metrics

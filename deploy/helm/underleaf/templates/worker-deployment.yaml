@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "underleaf.fullname" . }}-worker
+  labels:
+    {{- include "underleaf.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "underleaf.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "underleaf.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+    spec:
+      securityContext:
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      initContainers:
+        - name: wait-for-deps
+          image: busybox:1.36
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z {{ include "underleaf.fullname" . }}-postgres 5432; do
+                echo "waiting for postgres"; sleep 2
+              done
+              until nc -z {{ include "underleaf.fullname" . }}-rabbitmq 5672; do
+                echo "waiting for rabbitmq"; sleep 2
+              done
+              until nc -z {{ include "underleaf.fullname" . }}-minio 9000; do
+                echo "waiting for minio"; sleep 2
+              done
+              echo "all dependencies ready"
+      containers:
+        - name: worker
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          securityContext:
+            runAsUser: 1001
+            runAsGroup: 1001
+            allowPrivilegeEscalation: false
+          env:
+            - name: RABBITMQ_HOST
+              value: {{ include "underleaf.fullname" . }}-rabbitmq
+            - name: RABBITMQ_PORT
+              value: "5672"
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "underleaf.fullname" . }}-secret
+                  key: rabbitmq-username
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "underleaf.fullname" . }}-secret
+                  key: rabbitmq-password
+            - name: POSTGRES_HOST
+              value: {{ include "underleaf.fullname" . }}-postgres
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "underleaf.fullname" . }}-secret
+                  key: postgres-password
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: MINIO_ENDPOINT
+              value: "{{ include "underleaf.fullname" . }}-minio:9000"
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "underleaf.fullname" . }}-secret
+                  key: minio-root-user
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "underleaf.fullname" . }}-secret
+                  key: minio-root-password
+            - name: MINIO_BUCKET
+              value: {{ .Values.minio.bucket | quote }}
+            - name: WORKER_CONCURRENCY
+              value: {{ .Values.worker.concurrency | quote }}
+            - name: COMPILE_TIMEOUT
+              value: {{ .Values.worker.compileTimeout | quote }}
+            - name: SANDBOX_DIR
+              value: /sandbox
+            - name: OUTPUT_DIR
+              value: /output
+            - name: LOG_DIR
+              value: /logs
+          volumeMounts:
+            - name: sandbox
+              mountPath: /sandbox
+            - name: output
+              mountPath: /output
+            - name: logs
+              mountPath: /logs
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+      volumes:
+        - name: sandbox
+          emptyDir: {}
+        - name: output
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}

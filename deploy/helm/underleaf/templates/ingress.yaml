@@ -1,0 +1,44 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "underleaf.fullname" . }}
+  labels:
+    {{- include "underleaf.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingress
+  annotations:
+    {{- toYaml .Values.ingress.annotations | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "underleaf.fullname" . }}-backend
+                port:
+                  number: 8000
+          - path: /ws-collab
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "underleaf.fullname" . }}-collab
+                port:
+                  number: 1234
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "underleaf.fullname" . }}-frontend
+                port:
+                  number: 80
+{{- end }}

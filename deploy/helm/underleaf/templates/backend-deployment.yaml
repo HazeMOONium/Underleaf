@@ -1,0 +1,175 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "underleaf.fullname" . }}-backend
+  labels:
+    {{- include "underleaf.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  replicas: {{ .Values.backend.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "underleaf.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        {{- include "underleaf.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: backend
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "underleaf.selectorLabels" . | nindent 20 }}
+                    app.kubernetes.io/component: backend
+                topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: wait-for-deps
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z {{ include "underleaf.fullname" . }}-postgres 5432; do
+                echo "waiting for postgres"; sleep 2
+              done
+              until nc -z {{ include "underleaf.fullname" . }}-redis 6379; do
+                echo "waiting for redis"; sleep 2
+              done
+              until nc -z {{ include "underleaf.fullname" . }}-minio 9000; do
+                echo "waiting for minio"; sleep 2
+              done
+              until nc -z {{ include "underleaf.fullname" . }}-rabbitmq 5672; do
+                echo "waiting for rabbitmq"; sleep 2
+              done
+              echo "all dependencies ready"
+        - name: migrate
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          command:
+            - alembic
+            - upgrade
+            - head
+          env:
+            - name: POSTGRES_HOST
+              value: {{ include "underleaf.fullname" . }}-postgres
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "underleaf.fullname" . }}-secret
+                  key: postgres-password
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: POSTGRES_HOST
+              value: {{ include "underleaf.fullname" . }}-postgres
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "underleaf.fullname" . }}-secret
+                  key: postgres-password
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: REDIS_HOST
+              value: {{ include "underleaf.fullname" . }}-redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: MINIO_ENDPOINT
+              value: "{{ include "underleaf.fullname" . }}-minio:9000"
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "underleaf.fullname" . }}-secret
+                  key: minio-root-user
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "underleaf.fullname" . }}-secret
+                  key: minio-root-password
+            - name: MINIO_BUCKET
+              value: {{ .Values.minio.bucket | quote }}
+            - name: MINIO_SECURE
+              value: "false"
+            - name: MINIO_PUBLIC_URL
+              value: {{ .Values.backend.env.minioPublicUrl | quote }}
+            - name: RABBITMQ_HOST
+              value: {{ include "underleaf.fullname" . }}-rabbitmq
+            - name: RABBITMQ_PORT
+              value: "5672"
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "underleaf.fullname" . }}-secret
+                  key: rabbitmq-username
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "underleaf.fullname" . }}-secret
+                  key: rabbitmq-password
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "underleaf.fullname" . }}-secret
+                  key: secret-key
+            - name: ACCESS_TOKEN_EXPIRE_MINUTES
+              value: {{ .Values.backend.env.accessTokenExpireMinutes | quote }}
+            - name: FRONTEND_URL
+              value: {{ .Values.backend.env.frontendUrl | quote }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "underleaf.fullname" . }}-secret
+                  key: anthropic-api-key
+            - name: SMTP_HOST
+              value: {{ .Values.backend.env.smtpHost | quote }}
+            - name: SMTP_PORT
+              value: {{ .Values.backend.env.smtpPort | quote }}
+            - name: SMTP_USER
+              value: {{ .Values.backend.env.smtpUser | quote }}
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "underleaf.fullname" . }}-secret
+                  key: smtp-password
+            - name: SMTP_FROM
+              value: {{ .Values.backend.env.smtpFrom | quote }}
+            - name: DEBUG
+              value: "false"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}

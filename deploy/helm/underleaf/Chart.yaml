@@ -1,0 +1,10 @@
+apiVersion: v2
+name: underleaf
+description: Self-hosted collaborative LaTeX editor
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - latex
+  - collaboration
+  - editor

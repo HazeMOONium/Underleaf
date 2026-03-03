@@ -1,0 +1,167 @@
+nameOverride: ""
+fullnameOverride: ""
+
+backend:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/your-org/underleaf-backend
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8000
+  resources:
+    limits:
+      memory: 512Mi
+      cpu: "2"
+    requests:
+      memory: 256Mi
+      cpu: "200m"
+  env:
+    secretKey: "change-me-generate-with-openssl-rand-hex-32"
+    accessTokenExpireMinutes: 15
+    frontendUrl: "https://underleaf.example.com"
+    minioPublicUrl: ""
+    anthropicApiKey: ""
+    smtpHost: ""
+    smtpPort: 587
+    smtpUser: ""
+    smtpPassword: ""
+    smtpFrom: "noreply@underleaf.local"
+
+collab:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/your-org/underleaf-collab
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 1234
+  resources:
+    limits:
+      memory: 256Mi
+      cpu: "1"
+    requests:
+      memory: 128Mi
+      cpu: "100m"
+
+worker:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/your-org/underleaf-worker
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  concurrency: 2
+  compileTimeout: 120
+  resources:
+    limits:
+      memory: 2Gi
+      cpu: "2"
+    requests:
+      memory: 512Mi
+      cpu: "500m"
+
+frontend:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/your-org/underleaf-frontend
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    limits:
+      memory: 128Mi
+      cpu: "500m"
+    requests:
+      memory: 64Mi
+      cpu: "50m"
+
+postgresql:
+  image:
+    repository: postgres
+    tag: "15-alpine"
+    pullPolicy: IfNotPresent
+  auth:
+    database: underleaf
+    username: underleaf
+    password: underleaf
+  storage:
+    size: 10Gi
+    storageClassName: ""
+  resources:
+    limits:
+      memory: 512Mi
+      cpu: "1"
+    requests:
+      memory: 256Mi
+      cpu: "100m"
+
+redis:
+  image:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  storage:
+    size: 2Gi
+    storageClassName: ""
+  resources:
+    limits:
+      memory: 256Mi
+      cpu: "500m"
+    requests:
+      memory: 128Mi
+      cpu: "50m"
+
+minio:
+  image:
+    repository: minio/minio
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  auth:
+    rootUser: minioadmin
+    rootPassword: minioadmin
+  bucket: underleaf-files
+  storage:
+    size: 50Gi
+    storageClassName: ""
+  resources:
+    limits:
+      memory: 512Mi
+      cpu: "1"
+    requests:
+      memory: 256Mi
+      cpu: "100m"
+
+rabbitmq:
+  image:
+    repository: rabbitmq
+    tag: "3-alpine"
+    pullPolicy: IfNotPresent
+  auth:
+    username: guest
+    password: guest
+  storage:
+    size: 2Gi
+    storageClassName: ""
+  resources:
+    limits:
+      memory: 256Mi
+      cpu: "500m"
+    requests:
+      memory: 128Mi
+      cpu: "50m"
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  host: "underleaf.example.com"
+  tls:
+    enabled: false
+    secretName: underleaf-tls
