@@ -349,7 +349,7 @@ def callback(ch, method, properties, body):
                     error_message=f"PDF upload failed: {exc}",
                 )
                 ch.basic_ack(delivery_tag=method.delivery_tag)
-                cleanup_job(project_id)
+                cleanup_job(job_id, project_id)
                 return
 
             # Upload SyncTeX file if present (best-effort)

@@ -6,9 +6,6 @@ import type * as Monaco from 'monaco-editor'
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore — no bundled types
 import { initVimMode } from 'monaco-vim'
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore — no bundled types
-import { EmacsExtension } from 'monaco-emacs'
 import * as Y from 'yjs'
 import { WebsocketProvider } from 'y-websocket'
 import { MonacoBinding } from 'y-monaco'
@@ -1222,9 +1219,16 @@ export default function EditorPage() {
       const vim = initVimMode(editor, vimStatusBarRef.current)
       keybindingCleanupRef.current = () => vim.dispose()
     } else if (keybindingMode === 'emacs') {
-      const emacs = new EmacsExtension(editor)
-      emacs.start()
-      keybindingCleanupRef.current = () => emacs.dispose()
+      // Dynamic import avoids AMD `define` crash at module load time;
+      // monaco-emacs is an AMD bundle and must be imported after Monaco sets up define.
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore — no bundled types
+      import('monaco-emacs').then(({ EmacsExtension }) => {
+        if (editorRef.current !== editor) return // editor changed while loading
+        const emacs = new EmacsExtension(editor)
+        emacs.start()
+        keybindingCleanupRef.current = () => emacs.dispose()
+      }).catch((err) => console.error('Failed to load monaco-emacs:', err))
     }
   }, [keybindingMode, editorMounted])
 
