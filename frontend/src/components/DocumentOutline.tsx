@@ -22,7 +22,7 @@ const LEVEL_MAP: Record<string, number> = {
   subsubsection: 4,
 }
 
-function parseOutline(content: string): OutlineEntry[] {
+export function parseOutline(content: string): OutlineEntry[] {
   const entries: OutlineEntry[] = []
   const lines = content.split('\n')
 
@@ -72,9 +72,7 @@ export default function DocumentOutline({
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  container: {
-    borderTop: '1px solid var(--color-border)',
-  },
+  container: {},
   header: {
     padding: '8px 16px',
     fontSize: '12px',
