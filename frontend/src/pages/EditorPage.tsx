@@ -13,14 +13,16 @@ import { projectsApi, compileApi, commentsApi, snapshotsApi } from '../services/
 import { useAuthStore } from '../stores/auth'
 import { useProjectRole } from '../hooks/useProjectRole'
 import FileTree from '../components/FileTree'
-import DocumentOutline from '../components/DocumentOutline'
+import DocumentOutline, { parseOutline } from '../components/DocumentOutline'
 import PDFViewer from '../components/PDFViewer'
 import AIPanel from '../components/AIPanel'
 import CollabModal from '../components/CollabModal'
 import CommentsPanel from '../components/CommentsPanel'
-import { registerLatexLanguage, registerLatexDiagnostics } from '../editor/latexLanguage'
+import { registerLatexLanguage, registerLatexDiagnostics, registerPreambleDecorations, registerAutoCloseEnvironment } from '../editor/latexLanguage'
 import { parseSyncTeX, findSourceFromClick } from '../utils/synctexParser'
 import type { SyncTeXData } from '../utils/synctexParser'
+import { computeLineDiff, computeFileDiff, mergeFileLists } from '../utils/diffUtils'
+import type { DiffLine, FileDiffStatus } from '../utils/diffUtils'
 import { userColor } from '../utils/userColor'
 import { canEdit, canComment, canManageMembers } from '../types'
 import toast from 'react-hot-toast'
@@ -163,6 +165,12 @@ export default function EditorPage() {
   const [pdfUrl, setPdfUrl] = useState<string | null>(null)
   const [syncTeXData, setSyncTeXData] = useState<SyncTeXData | null>(null)
   const [previewWidth, setPreviewWidth] = useState(400)
+  const [sidebarWidth, setSidebarWidth] = useState(() =>
+    parseInt(localStorage.getItem('sidebarWidth') || '220', 10))
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
+    localStorage.getItem('sidebarCollapsed') === 'true')
+  const [outlinePanelHeight, setOutlinePanelHeight] = useState(() =>
+    parseInt(localStorage.getItem('outlinePanelHeight') || '180', 10))
   const [showNewFileModal, setShowNewFileModal] = useState(false)
   const [newFileName, setNewFileName] = useState('')
   const [showNewFolderModal, setShowNewFolderModal] = useState(false)
@@ -175,6 +183,16 @@ export default function EditorPage() {
   const compileStartRef = useRef<number>(0)
   const [previewTab, setPreviewTab] = useState<'pdf' | 'logs' | 'files' | 'history'>('pdf')
   const [historyPdfUrl, setHistoryPdfUrl] = useState<string | null>(null)
+  const [snapshotBrowser, setSnapshotBrowser] = useState<{
+    snapshotId: string
+    label: string
+    files: { path: string; content: string }[]
+    selectedFile: string
+    viewMode: 'source' | 'diff-current' | 'diff-prev'
+    currentFiles: { path: string; content: string }[]
+    prevFiles: { path: string; content: string }[] | null
+  } | null>(null)
+  const [browseLoadingId, setBrowseLoadingId] = useState<string | null>(null)
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null)
   const [editingLabelText, setEditingLabelText] = useState('')
   const [connectedUsers, setConnectedUsers] = useState<AwarenessUser[]>([])
@@ -251,6 +269,7 @@ export default function EditorPage() {
   const newFileRef = useRef<() => void>(() => {})
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
   const latexDiagnosticsCleanupRef = useRef<(() => void) | null>(null)
+  const preambleDecorationsCleanupRef = useRef<(() => void) | null>(null)
   const remoteDecorationsRef = useRef<Monaco.editor.IEditorDecorationsCollection | null>(null)
   const keybindingCleanupRef = useRef<() => void>(() => {})
   const vimStatusBarRef = useRef<HTMLDivElement | null>(null)
@@ -271,6 +290,7 @@ export default function EditorPage() {
       if (pdfUrl) URL.revokeObjectURL(pdfUrl)
       if (historyPdfUrl) URL.revokeObjectURL(historyPdfUrl)
       if (latexDiagnosticsCleanupRef.current) latexDiagnosticsCleanupRef.current()
+      if (preambleDecorationsCleanupRef.current) preambleDecorationsCleanupRef.current()
       spellCheckerRef.current?.cleanup()
     }
   }, [])
@@ -303,6 +323,7 @@ export default function EditorPage() {
     queryKey: ['snapshots', projectId],
     queryFn: () => snapshotsApi.list(projectId!).then((res) => res.data),
     enabled: !!projectId && myRole !== false,
+    refetchInterval: previewTab === 'history' ? 10_000 : false,
   })
 
   // Sync engine from project data
@@ -830,6 +851,65 @@ export default function EditorPage() {
     [previewWidth],
   )
 
+  // Sidebar resize handler
+  const handleSidebarResizeMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault()
+      const startX = e.clientX
+      const startWidth = sidebarWidth
+
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        const newWidth = Math.max(150, Math.min(400, startWidth + (moveEvent.clientX - startX)))
+        setSidebarWidth(newWidth)
+        localStorage.setItem('sidebarWidth', String(newWidth))
+      }
+
+      const onMouseUp = () => {
+        document.removeEventListener('mousemove', onMouseMove)
+        document.removeEventListener('mouseup', onMouseUp)
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+      }
+
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+      document.addEventListener('mousemove', onMouseMove)
+      document.addEventListener('mouseup', onMouseUp)
+    },
+    [sidebarWidth],
+  )
+
+  // Outline panel vertical resize handler
+  const handleOutlineResizeMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault()
+      const startY = e.clientY
+      const startHeight = outlinePanelHeight
+
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        const newHeight = Math.max(80, Math.min(400, startHeight - (moveEvent.clientY - startY)))
+        setOutlinePanelHeight(newHeight)
+        localStorage.setItem('outlinePanelHeight', String(newHeight))
+      }
+
+      const onMouseUp = () => {
+        document.removeEventListener('mousemove', onMouseMove)
+        document.removeEventListener('mouseup', onMouseUp)
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+      }
+
+      document.body.style.cursor = 'row-resize'
+      document.body.style.userSelect = 'none'
+      document.addEventListener('mousemove', onMouseMove)
+      document.addEventListener('mouseup', onMouseUp)
+    },
+    [outlinePanelHeight],
+  )
+
+  // Check if outline has entries for conditional rendering
+  const outlineHasEntries = useMemo(() => parseOutline(content).length > 0, [content])
+
   // Create file handler
   const handleCreateFile = async () => {
     const trimmed = newFileName.trim()
@@ -979,6 +1059,13 @@ export default function EditorPage() {
     }
     latexDiagnosticsCleanupRef.current = registerLatexDiagnostics(monaco, editor)
 
+    if (preambleDecorationsCleanupRef.current) {
+      preambleDecorationsCleanupRef.current()
+    }
+    preambleDecorationsCleanupRef.current = registerPreambleDecorations(monaco, editor)
+
+    registerAutoCloseEnvironment(monaco, editor)
+
     // Spell checker — only for .tex files, loaded lazily
     spellCheckerRef.current?.cleanup()
     spellCheckerRef.current = null
@@ -1041,8 +1128,11 @@ export default function EditorPage() {
       }
     })
 
-    // Register Ctrl+N inside Monaco so it isn't swallowed by the editor's
-    // own keybinding system before it can bubble to the window listener.
+    // Register Ctrl+S/N inside Monaco so they aren't swallowed by the
+    // editor's own keybinding system before they can bubble to the window listener.
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+      saveRef.current()
+    })
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyN, () => {
       newFileRef.current()
     })
@@ -1274,6 +1364,31 @@ export default function EditorPage() {
   const logIssues = useMemo(() => (compileLogs ? parseLatexLog(compileLogs) : []), [compileLogs])
   const logErrorCount = logIssues.filter((i) => i.type === 'error').length
   const logWarningCount = logIssues.filter((i) => i.type === 'warning').length
+
+  // ── Snapshot browser diff state ───────────────────────────────────────────
+  const snapshotDiffBase = useMemo(() => {
+    if (!snapshotBrowser || snapshotBrowser.viewMode === 'source') return null
+    return snapshotBrowser.viewMode === 'diff-current'
+      ? snapshotBrowser.currentFiles
+      : (snapshotBrowser.prevFiles ?? [])
+  }, [snapshotBrowser])
+
+  const snapshotFileDiff = useMemo((): Map<string, FileDiffStatus> => {
+    if (!snapshotDiffBase) return new Map()
+    return computeFileDiff(snapshotDiffBase, snapshotBrowser!.files)
+  }, [snapshotDiffBase, snapshotBrowser])
+
+  const snapshotDiffFileList = useMemo((): string[] => {
+    if (!snapshotDiffBase) return snapshotBrowser?.files.map((f) => f.path) ?? []
+    return mergeFileLists(snapshotDiffBase, snapshotBrowser!.files)
+  }, [snapshotDiffBase, snapshotBrowser])
+
+  const snapshotLineDiff = useMemo((): DiffLine[] | null => {
+    if (!snapshotBrowser || !snapshotDiffBase) return null
+    const baseContent = snapshotDiffBase.find((f) => f.path === snapshotBrowser.selectedFile)?.content ?? ''
+    const snapContent = snapshotBrowser.files.find((f) => f.path === snapshotBrowser.selectedFile)?.content ?? ''
+    return computeLineDiff(baseContent, snapContent)
+  }, [snapshotBrowser, snapshotDiffBase])
 
   // ── Feature B: sidebar drag-and-drop upload handlers ─────────────────────
   const handleSidebarDragOver = useCallback((e: React.DragEvent) => {
@@ -1532,71 +1647,131 @@ export default function EditorPage() {
 
       <div style={styles.main}>
         {/* ── Sidebar ──────────────────────────────────────────────────── */}
-        <aside
-          style={styles.sidebar}
-          className="dark-panel"
-          onDragOver={handleSidebarDragOver}
-          onDragLeave={handleSidebarDragLeave}
-          onDrop={handleSidebarDrop}
-        >
-          {/* Drag-over overlay */}
-          {sidebarDragOver && (
-            <div style={styles.sidebarDropOverlay}>
-              <div style={styles.sidebarDropLabel}>Drop files to upload</div>
-            </div>
-          )}
-          <div style={styles.sidebarHeader}>
-            <span style={styles.sidebarLabel}>FILES</span>
-            {editorRole && (
-              <div style={{ display: 'flex', gap: '2px' }}>
-                <button
-                  style={styles.sidebarIconBtn}
-                  onClick={() => handleCreateFolder('')}
-                  title="New folder"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                  </svg>
-                </button>
-                <button
-                  style={styles.sidebarIconBtn}
-                  onClick={() => setShowNewFileModal(true)}
-                  title="New file"
-                >
-                  +
-                </button>
+        {sidebarCollapsed ? (
+          <div
+            className="dark-panel"
+            style={{
+              width: '24px',
+              backgroundColor: 'var(--color-sidebar-bg)',
+              borderRight: '1px solid var(--color-sidebar-border)',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
+              cursor: 'pointer',
+            }}
+            onClick={() => { setSidebarCollapsed(false); localStorage.setItem('sidebarCollapsed', 'false') }}
+            title="Expand sidebar"
+          >
+            <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: '12px', writingMode: 'vertical-rl' }}>›</span>
+          </div>
+        ) : (
+          <aside
+            style={{ ...styles.sidebar, width: `${sidebarWidth}px` }}
+            className="dark-panel"
+            onDragOver={handleSidebarDragOver}
+            onDragLeave={handleSidebarDragLeave}
+            onDrop={handleSidebarDrop}
+          >
+            {/* Drag-over overlay */}
+            {sidebarDragOver && (
+              <div style={styles.sidebarDropOverlay}>
+                <div style={styles.sidebarDropLabel}>Drop files to upload</div>
               </div>
             )}
-          </div>
-          <div style={styles.sidebarContent}>
-            {files && (
-              <FileTree
-                files={files}
-                currentFile={currentFile}
-                onSelectFile={setCurrentFile}
-                onDeleteFile={editorRole ? (path) => deleteFileMutation.mutate(path) : undefined}
-                onRenameFile={editorRole ? (oldPath, newPath) =>
-                  renameFileMutation.mutate({ oldPath, newPath }) : undefined}
-                onNewFileInFolder={editorRole ? handleNewFileInFolder : undefined}
-                onCreateFolder={editorRole ? handleCreateFolder : undefined}
-                onDownloadFile={handleDownloadFile}
-                onDuplicateFile={editorRole ? handleDuplicateFile : undefined}
-                onDeleteFolder={editorRole ? handleDeleteFolder : undefined}
-              />
+            <div style={styles.sidebarHeader}>
+              <span style={styles.sidebarLabel}>FILES</span>
+              <div style={{ display: 'flex', gap: '2px', alignItems: 'center' }}>
+                {editorRole && (
+                  <>
+                    <button
+                      style={styles.sidebarIconBtn}
+                      onClick={() => handleCreateFolder('')}
+                      title="New folder"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                      </svg>
+                    </button>
+                    <button
+                      style={styles.sidebarIconBtn}
+                      onClick={() => setShowNewFileModal(true)}
+                      title="New file"
+                    >
+                      +
+                    </button>
+                  </>
+                )}
+                <button
+                  style={{ ...styles.sidebarIconBtn, marginLeft: '4px' }}
+                  onClick={() => { setSidebarCollapsed(true); localStorage.setItem('sidebarCollapsed', 'true') }}
+                  title="Collapse sidebar"
+                >
+                  <span style={{ fontSize: '12px' }}>‹</span>
+                </button>
+              </div>
+            </div>
+            {/* Upper panel: file tree + AI */}
+            <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+              {files && (
+                <FileTree
+                  files={files}
+                  currentFile={currentFile}
+                  onSelectFile={setCurrentFile}
+                  onDeleteFile={editorRole ? (path) => deleteFileMutation.mutate(path) : undefined}
+                  onRenameFile={editorRole ? (oldPath, newPath) =>
+                    renameFileMutation.mutate({ oldPath, newPath }) : undefined}
+                  onNewFileInFolder={editorRole ? handleNewFileInFolder : undefined}
+                  onCreateFolder={editorRole ? handleCreateFolder : undefined}
+                  onDownloadFile={handleDownloadFile}
+                  onDuplicateFile={editorRole ? handleDuplicateFile : undefined}
+                  onDeleteFolder={editorRole ? handleDeleteFolder : undefined}
+                />
+              )}
+              {showAIPanel && (
+                <AIPanel
+                  errorLogs={compileError ? compileLogs || null : null}
+                  fileContent={content}
+                  selectedText={selectedText}
+                />
+              )}
+            </div>
+            {/* Lower panel: Document Outline (only when entries exist) */}
+            {outlineHasEntries && (
+              <>
+                <div
+                  style={{
+                    height: '4px',
+                    cursor: 'row-resize',
+                    backgroundColor: 'var(--color-border)',
+                    flexShrink: 0,
+                  }}
+                  onMouseDown={handleOutlineResizeMouseDown}
+                />
+                <div style={{ height: `${outlinePanelHeight}px`, overflow: 'auto', flexShrink: 0 }}>
+                  <DocumentOutline
+                    content={outlineContent}
+                    onNavigate={handleOutlineNavigate}
+                  />
+                </div>
+              </>
             )}
-            <DocumentOutline
-              content={outlineContent}
-              onNavigate={handleOutlineNavigate}
+            {/* Sidebar resize handle */}
+            <div
+              style={{
+                position: 'absolute',
+                top: 0,
+                right: 0,
+                width: '4px',
+                height: '100%',
+                cursor: 'col-resize',
+                zIndex: 5,
+              }}
+              onMouseDown={handleSidebarResizeMouseDown}
             />
-            {showAIPanel && (
-              <AIPanel
-                errorLogs={compileError ? compileLogs || null : null}
-                fileContent={content}
-                selectedText={selectedText}
-              />
-            )}
-          </div>
-        </aside>
+          </aside>
+        )}
 
         {/* ── Editor ───────────────────────────────────────────────────── */}
         <div style={{ ...styles.editor, display: 'flex', flexDirection: 'column', position: 'relative' }}>
@@ -1836,12 +2011,7 @@ export default function EditorPage() {
           <div style={styles.previewContent}>
             {/* ── PDF tab ── */}
             {previewTab === 'pdf' && (
-              compiling ? (
-                <div style={styles.previewEmpty}>
-                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin" style={{ marginBottom: '12px', color: 'var(--color-brand)' }}><circle cx="12" cy="12" r="10" strokeOpacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/></svg>
-                  <p style={styles.previewEmptyText}>Compiling…</p>
-                </div>
-              ) : historyPdfUrl ? (
+              historyPdfUrl ? (
                 <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
                   <div style={{
                     padding: '6px 10px',
@@ -1868,10 +2038,28 @@ export default function EditorPage() {
                   <PDFViewer url={historyPdfUrl} />
                 </div>
               ) : pdfUrl ? (
-                <PDFViewer
-                  url={pdfUrl}
-                  onDoubleClick={syncTeXData ? handlePDFDoubleClick : undefined}
-                />
+                <div style={{ position: 'relative', height: '100%' }}>
+                  <PDFViewer
+                    url={pdfUrl}
+                    onDoubleClick={syncTeXData ? handlePDFDoubleClick : undefined}
+                  />
+                  {compiling && (
+                    <div style={{
+                      position: 'absolute', top: '8px', right: '8px', zIndex: 10,
+                      display: 'flex', alignItems: 'center', gap: '6px',
+                      padding: '4px 10px', borderRadius: '4px',
+                      background: 'rgba(0,0,0,0.75)', color: '#fff', fontSize: '11px',
+                    }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin"><circle cx="12" cy="12" r="10" strokeOpacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/></svg>
+                      Compiling…
+                    </div>
+                  )}
+                </div>
+              ) : compiling ? (
+                <div style={styles.previewEmpty}>
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin" style={{ marginBottom: '12px', color: 'var(--color-brand)' }}><circle cx="12" cy="12" r="10" strokeOpacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/></svg>
+                  <p style={styles.previewEmptyText}>Compiling…</p>
+                </div>
               ) : (
                 <div style={styles.previewEmpty}>
                   <div style={styles.previewEmptyIcon}>
@@ -2078,14 +2266,75 @@ export default function EditorPage() {
                                 {snap.label || <span style={{ opacity: 0.45 }}>{dateStr} {timeStr}</span>}
                               </div>
                             )}
-                            {snap.label && (
-                              <div style={{ fontSize: '10px', opacity: 0.5 }}>{dateStr} {timeStr}</div>
+                            {(snap.label || snap.creator_email) && (
+                              <div style={{ fontSize: '10px', opacity: 0.5 }}>
+                                {snap.label ? `${dateStr} ${timeStr}` : ''}
+                                {snap.creator_email && (
+                                  <span>{snap.label ? ' · ' : ''}by {snap.creator_email}</span>
+                                )}
+                              </div>
                             )}
                           </div>
                         </div>
                         <div style={{ display: 'flex', gap: '4px', justifyContent: 'flex-end' }}>
                           {snap.artifact_ref && (
                             <>
+                              <button
+                                style={{ fontSize: '11px', padding: '3px 8px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '4px', color: browseLoadingId === snap.id ? '#888' : '#ccc', cursor: browseLoadingId === snap.id ? 'default' : 'pointer' }}
+                                disabled={browseLoadingId === snap.id}
+                                onClick={async () => {
+                                  if (browseLoadingId) return
+                                  setBrowseLoadingId(snap.id)
+                                  try {
+                                    // Fetch snapshot source
+                                    const res = await snapshotsApi.getSource(projectId!, snap.id)
+                                    const files = res.data.files
+                                    if (!files.length) { toast.error('No source files in this snapshot'); return }
+
+                                    // Fetch current project files with content
+                                    const fileListRes = await projectsApi.listFiles(projectId!)
+                                    const currentFiles = await Promise.all(
+                                      fileListRes.data.map(async (f) => {
+                                        try {
+                                          const r = await projectsApi.getFile(projectId!, f.path)
+                                          return { path: f.path, content: typeof r.data === 'string' ? r.data : '' }
+                                        } catch {
+                                          return { path: f.path, content: '' }
+                                        }
+                                      })
+                                    )
+
+                                    // Find previous snapshot (list is desc by date, so next index = older)
+                                    const snapIdx = snapshots.findIndex((s) => s.id === snap.id)
+                                    let prevFiles: { path: string; content: string }[] | null = null
+                                    if (snapIdx >= 0 && snapIdx < snapshots.length - 1) {
+                                      try {
+                                        const prevSnap = snapshots[snapIdx + 1]
+                                        const prevRes = await snapshotsApi.getSource(projectId!, prevSnap.id)
+                                        prevFiles = prevRes.data.files
+                                      } catch {
+                                        prevFiles = null
+                                      }
+                                    }
+
+                                    const label = snap.label || new Date(snap.created_at).toLocaleString()
+                                    setSnapshotBrowser({
+                                      snapshotId: snap.id, label, files,
+                                      selectedFile: files[0].path,
+                                      viewMode: 'diff-current',
+                                      currentFiles,
+                                      prevFiles,
+                                    })
+                                  } catch (err: any) {
+                                    const msg = err?.response?.data?.detail || 'Source not available for this snapshot'
+                                    toast.error(msg)
+                                  } finally {
+                                    setBrowseLoadingId(null)
+                                  }
+                                }}
+                              >
+                                {browseLoadingId === snap.id ? 'Loading…' : 'Browse Files'}
+                              </button>
                               <button
                                 style={{ fontSize: '11px', padding: '3px 8px', background: 'var(--color-brand)', border: 'none', borderRadius: '4px', color: '#fff', cursor: 'pointer' }}
                                 onClick={async () => {
@@ -2126,26 +2375,46 @@ export default function EditorPage() {
                             </>
                           )}
                           {editorRole && (
-                            <button
-                              style={{ fontSize: '11px', padding: '3px 6px', background: 'none', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '4px', color: '#888', cursor: 'pointer' }}
-                              title="Delete snapshot"
-                              onClick={async () => {
-                                if (!confirm('Delete this snapshot?')) return
-                                try {
-                                  await snapshotsApi.delete(projectId!, snap.id)
-                                  queryClient.invalidateQueries({ queryKey: ['snapshots', projectId] })
-                                  toast.success('Snapshot deleted')
-                                  if (historyPdfUrl) {
-                                    URL.revokeObjectURL(historyPdfUrl)
-                                    setHistoryPdfUrl(null)
+                            <>
+                              <button
+                                style={{ fontSize: '11px', padding: '3px 8px', background: 'rgba(26,127,75,0.15)', border: '1px solid rgba(26,127,75,0.35)', borderRadius: '4px', color: '#4ade80', cursor: 'pointer' }}
+                                title="Restore project to this snapshot"
+                                onClick={async () => {
+                                  const label = snap.label || new Date(snap.created_at).toLocaleString()
+                                  if (!confirm(`Restore all project files to "${label}"?\n\nThis will overwrite every file in the project with the state from that compile. Collaborators will see the change after the page reloads.`)) return
+                                  try {
+                                    await snapshotsApi.restore(projectId!, snap.id)
+                                    toast.success('Restored — reloading…')
+                                    setTimeout(() => window.location.reload(), 1200)
+                                  } catch (err: any) {
+                                    const msg = err?.response?.data?.detail || 'Failed to restore snapshot'
+                                    toast.error(msg)
                                   }
-                                } catch {
-                                  toast.error('Failed to delete snapshot')
-                                }
-                              }}
-                            >
-                              ✕
-                            </button>
+                                }}
+                              >
+                                ↩ Restore
+                              </button>
+                              <button
+                                style={{ fontSize: '11px', padding: '3px 6px', background: 'none', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '4px', color: '#888', cursor: 'pointer' }}
+                                title="Delete snapshot"
+                                onClick={async () => {
+                                  if (!confirm('Delete this snapshot?')) return
+                                  try {
+                                    await snapshotsApi.delete(projectId!, snap.id)
+                                    queryClient.invalidateQueries({ queryKey: ['snapshots', projectId] })
+                                    toast.success('Snapshot deleted')
+                                    if (historyPdfUrl) {
+                                      URL.revokeObjectURL(historyPdfUrl)
+                                      setHistoryPdfUrl(null)
+                                    }
+                                  } catch {
+                                    toast.error('Failed to delete snapshot')
+                                  }
+                                }}
+                              >
+                                ✕
+                              </button>
+                            </>
                           )}
                         </div>
                       </div>
@@ -2313,6 +2582,172 @@ export default function EditorPage() {
           </div>
         </div>
       )}
+      {snapshotBrowser && (() => {
+        const statusColor: Record<string, string> = { added: '#4ade80', deleted: '#f87171', modified: '#fbbf24', unchanged: '#475569' }
+        const statusLabel: Record<string, string> = { added: 'A', deleted: 'D', modified: 'M', unchanged: '' }
+        const inDiffMode = snapshotBrowser.viewMode !== 'source'
+        const fileList = inDiffMode ? snapshotDiffFileList : snapshotBrowser.files.map((f) => f.path)
+        return (
+          <div style={{
+            position: 'fixed', inset: 0, zIndex: 1000,
+            background: 'rgba(0,0,0,0.72)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }} onClick={() => setSnapshotBrowser(null)}>
+            <div style={{
+              background: '#1a2133', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.12)',
+              width: '90vw', maxWidth: '1200px', height: '85vh', display: 'flex', flexDirection: 'column',
+              boxShadow: '0 24px 64px rgba(0,0,0,0.6)',
+            }} onClick={e => e.stopPropagation()}>
+
+              {/* Header */}
+              <div style={{ padding: '12px 18px', borderBottom: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+                <div>
+                  <span style={{ fontWeight: 600, color: '#e2e8f0', fontSize: '13px' }}>Snapshot Browser</span>
+                  <span style={{ fontSize: '11px', color: '#64748b', marginLeft: '10px' }}>{snapshotBrowser.label}</span>
+                </div>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  {editorRole && (
+                    <button
+                      style={{ fontSize: '12px', padding: '4px 12px', background: '#1a7f4b', border: 'none', borderRadius: '5px', color: '#fff', cursor: 'pointer', fontWeight: 600 }}
+                      onClick={async () => {
+                        if (!confirm(`Restore all project files to "${snapshotBrowser.label}"?\n\nThis will overwrite every file in the project. Collaborators will see the change after the page reloads.`)) return
+                        try {
+                          await snapshotsApi.restore(projectId!, snapshotBrowser.snapshotId)
+                          toast.success('Restored — reloading…')
+                          setTimeout(() => window.location.reload(), 1200)
+                        } catch (err: any) {
+                          toast.error(err?.response?.data?.detail || 'Restore failed')
+                        }
+                      }}
+                    >↩ Restore</button>
+                  )}
+                  <button
+                    style={{ fontSize: '12px', padding: '4px 10px', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '5px', color: '#94a3b8', cursor: 'pointer' }}
+                    onClick={() => setSnapshotBrowser(null)}
+                  >Close</button>
+                </div>
+              </div>
+
+              {/* View-mode toggle */}
+              <div style={{ padding: '8px 18px', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', gap: '4px', flexShrink: 0 }}>
+                {(['source', 'diff-current', 'diff-prev'] as const).map((mode) => {
+                  if (mode === 'diff-prev' && !snapshotBrowser.prevFiles) return null
+                  const labels = { source: 'Source', 'diff-current': 'vs Current', 'diff-prev': 'vs Previous Snapshot' }
+                  const active = snapshotBrowser.viewMode === mode
+                  return (
+                    <button key={mode}
+                      style={{ fontSize: '11px', padding: '3px 10px', borderRadius: '4px', border: active ? 'none' : '1px solid rgba(255,255,255,0.12)', background: active ? 'rgba(37,99,235,0.5)' : 'transparent', color: active ? '#e2e8f0' : '#64748b', cursor: 'pointer', fontWeight: active ? 600 : 400 }}
+                      onClick={() => setSnapshotBrowser((prev) => prev ? { ...prev, viewMode: mode } : prev)}
+                    >{labels[mode]}</button>
+                  )
+                })}
+                {inDiffMode && (() => {
+                  const changed = Array.from(snapshotFileDiff.values()).filter((s) => s !== 'unchanged').length
+                  const added = Array.from(snapshotFileDiff.values()).filter((s) => s === 'added').length
+                  const deleted = Array.from(snapshotFileDiff.values()).filter((s) => s === 'deleted').length
+                  const modified = Array.from(snapshotFileDiff.values()).filter((s) => s === 'modified').length
+                  return (
+                    <span style={{ marginLeft: 'auto', fontSize: '11px', color: '#64748b', display: 'flex', gap: '10px', alignItems: 'center' }}>
+                      {changed === 0 && <span style={{ color: '#475569' }}>No changes</span>}
+                      {added > 0 && <span style={{ color: '#4ade80' }}>+{added} added</span>}
+                      {deleted > 0 && <span style={{ color: '#f87171' }}>−{deleted} deleted</span>}
+                      {modified > 0 && <span style={{ color: '#fbbf24' }}>{modified} modified</span>}
+                    </span>
+                  )
+                })()}
+              </div>
+
+              {/* Body */}
+              <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+                {/* File list */}
+                <div style={{ width: '220px', flexShrink: 0, borderRight: '1px solid rgba(255,255,255,0.06)', overflowY: 'auto', padding: '6px 0' }}>
+                  {fileList.map((path) => {
+                    const status = inDiffMode ? (snapshotFileDiff.get(path) ?? 'unchanged') : 'unchanged'
+                    const isSelected = path === snapshotBrowser.selectedFile
+                    return (
+                      <div
+                        key={path}
+                        title={path}
+                        onClick={() => setSnapshotBrowser((prev) => prev ? { ...prev, selectedFile: path } : prev)}
+                        style={{
+                          padding: '5px 10px 5px 12px', fontSize: '12px', cursor: 'pointer', userSelect: 'none',
+                          display: 'flex', alignItems: 'center', gap: '6px',
+                          color: isSelected ? '#e2e8f0' : '#94a3b8',
+                          background: isSelected ? 'rgba(37,99,235,0.15)' : 'transparent',
+                          borderLeft: isSelected ? '3px solid #2563eb' : '3px solid transparent',
+                        }}
+                      >
+                        {inDiffMode && status !== 'unchanged' && (
+                          <span style={{ color: statusColor[status], fontWeight: 700, fontSize: '10px', flexShrink: 0, width: '12px' }}>
+                            {statusLabel[status]}
+                          </span>
+                        )}
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{path}</span>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {/* Content / Diff viewer */}
+                <div style={{ flex: 1, overflowY: 'auto', fontFamily: 'monospace', fontSize: '12px', lineHeight: '1.55' }}>
+                  {inDiffMode ? (() => {
+                    const status = snapshotFileDiff.get(snapshotBrowser.selectedFile)
+                    if (status === 'unchanged') {
+                      return (
+                        <div style={{ padding: '20px', color: '#475569', fontStyle: 'italic' }}>
+                          No changes in this file.
+                        </div>
+                      )
+                    }
+                    if (snapshotLineDiff === null || snapshotLineDiff.length === 0) {
+                      return (
+                        <div style={{ padding: '20px', color: '#475569', fontStyle: 'italic' }}>
+                          {status === 'added' ? 'File added in this snapshot (not in base).' : status === 'deleted' ? 'File deleted in this snapshot (not present).' : 'No textual differences.'}
+                        </div>
+                      )
+                    }
+                    return (
+                      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                        <tbody>
+                          {snapshotLineDiff.map((line, idx) => {
+                            if (line.kind === 'sep') {
+                              return (
+                                <tr key={idx}>
+                                  <td colSpan={3} style={{ padding: '2px 14px', color: '#475569', background: '#151c2c', fontSize: '11px', userSelect: 'none' }}>
+                                    ···
+                                  </td>
+                                </tr>
+                              )
+                            }
+                            const bg = line.kind === 'add' ? 'rgba(34,197,94,0.1)' : line.kind === 'del' ? 'rgba(239,68,68,0.1)' : 'transparent'
+                            const color = line.kind === 'add' ? '#4ade80' : line.kind === 'del' ? '#f87171' : '#94a3b8'
+                            const prefix = line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ' '
+                            const oldNum = line.kind === 'ctx' ? line.oldLine : line.kind === 'del' ? line.oldLine : null
+                            const newNum = line.kind === 'ctx' ? line.newLine : line.kind === 'add' ? line.newLine : null
+                            return (
+                              <tr key={idx} style={{ background: bg }}>
+                                <td style={{ width: '36px', padding: '1px 6px', color: '#374151', textAlign: 'right', userSelect: 'none', fontSize: '11px', borderRight: '1px solid rgba(255,255,255,0.04)' }}>{oldNum ?? ''}</td>
+                                <td style={{ width: '36px', padding: '1px 6px', color: '#374151', textAlign: 'right', userSelect: 'none', fontSize: '11px', borderRight: '1px solid rgba(255,255,255,0.04)' }}>{newNum ?? ''}</td>
+                                <td style={{ padding: '1px 10px', color, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                                  <span style={{ color: line.kind === 'ctx' ? '#374151' : color, marginRight: '6px', userSelect: 'none' }}>{prefix}</span>
+                                  {line.text}
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    )
+                  })() : (
+                    <pre style={{ margin: 0, padding: '16px 20px', color: '#cbd5e1', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                      {snapshotBrowser.files.find((f) => f.path === snapshotBrowser.selectedFile)?.content ?? ''}
+                    </pre>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
       {showCollabModal && projectId && (
         <CollabModal
           projectId={projectId}
@@ -2424,7 +2859,6 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
   },
   sidebar: {
-    width: '220px',
     backgroundColor: 'var(--color-sidebar-bg)',
     borderRight: '1px solid var(--color-sidebar-border)',
     display: 'flex',

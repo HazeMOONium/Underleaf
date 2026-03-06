@@ -33,8 +33,11 @@ export function registerLatexDiagnostics(
       const commentIdx = raw.search(/(?<!\\)%/)
       const line = commentIdx >= 0 ? raw.slice(0, commentIdx) : raw
 
-      // Check for \end{document}
-      if (/\\end\{document\}/.test(line)) hasEndDocument = true
+      // Check for \end{document} — stop processing content after this line
+      if (/\\end\{document\}/.test(line)) {
+        hasEndDocument = true
+        break
+      }
 
       // Track $$ math display blocks
       const ddMatches = line.match(/\$\$/g)
@@ -184,6 +187,126 @@ export function registerLatexDiagnostics(
     const model = editor.getModel()
     if (model) monaco.editor.setModelMarkers(model, OWNER, [])
   }
+}
+
+/**
+ * Decorates lines outside \begin{document}...\end{document} with a comment-like style.
+ * Returns a cleanup function.
+ */
+export function registerPreambleDecorations(
+  monaco: typeof Monaco,
+  editor: Monaco.editor.IStandaloneCodeEditor,
+): () => void {
+  const decorationsCollection = editor.createDecorationsCollection([])
+
+  const update = () => {
+    const model = editor.getModel()
+    if (!model) {
+      decorationsCollection.set([])
+      return
+    }
+
+    const lines = model.getLinesContent()
+
+    // Find all \begin{document} lines (1-based)
+    const beginDocLines: number[] = []
+    for (let i = 0; i < lines.length; i++) {
+      if (/\\begin\{document\}/.test(lines[i])) beginDocLines.push(i + 1)
+    }
+
+    // No \begin{document} — nothing to dim
+    if (beginDocLines.length === 0) {
+      decorationsCollection.set([])
+      return
+    }
+
+    // Find the \end{document} that closes the last \begin{document}
+    // (use the last \end{document} appearing after the last \begin{document})
+    const lastBegin = beginDocLines[0]
+    let endDocLine = -1
+    for (let i = lastBegin; i < lines.length; i++) {
+      if (/\\end\{document\}/.test(lines[i])) {
+        endDocLine = i + 1
+        break
+      }
+    }
+
+    // No \end{document} after the last \begin{document} — nothing to dim
+    if (endDocLine === -1) {
+      decorationsCollection.set([])
+      return
+    }
+
+    const totalLines = model.getLineCount()
+    if (endDocLine >= totalLines) {
+      decorationsCollection.set([])
+      return
+    }
+
+    decorationsCollection.set([
+      {
+        range: new monaco.Range(endDocLine + 1, 1, totalLines, model.getLineMaxColumn(totalLines)),
+        options: {
+          isWholeLine: true,
+          inlineClassName: 'latex-outside-document',
+        },
+      },
+    ])
+  }
+
+  update()
+  const contentDisposable = editor.onDidChangeModelContent(() => update())
+  const modelDisposable = editor.onDidChangeModel(() => update())
+
+  return () => {
+    contentDisposable.dispose()
+    modelDisposable.dispose()
+    decorationsCollection.clear()
+  }
+}
+
+/**
+ * Auto-closes \begin{env} by inserting a blank line + \end{env} when the
+ * closing } of \begin{...} is typed. Places the cursor on the blank line.
+ */
+export function registerAutoCloseEnvironment(
+  monaco: typeof Monaco,
+  editor: Monaco.editor.IStandaloneCodeEditor,
+): () => void {
+  const disposable = editor.onDidChangeModelContent((e) => {
+    // Only react to a single '}' insertion
+    if (e.changes.length !== 1 || e.changes[0].text !== '}') return
+
+    const model = editor.getModel()
+    if (!model) return
+    const position = editor.getPosition()
+    if (!position) return
+
+    const lineContent = model.getLineContent(position.lineNumber)
+    const textUpToCursor = lineContent.slice(0, position.column - 1)
+    const match = textUpToCursor.match(/\\begin\{([^}]*)\}$/)
+    if (!match) return
+
+    const envName = match[1]
+    const indent = lineContent.match(/^(\s*)/)?.[1] ?? ''
+
+    editor.executeEdits('auto-close-env', [
+      {
+        range: new monaco.Range(
+          position.lineNumber,
+          position.column,
+          position.lineNumber,
+          position.column,
+        ),
+        text: `\n${indent}\t\n${indent}\\end{${envName}}`,
+      },
+    ])
+
+    // Place cursor on the blank body line, after the indent + tab
+    editor.setPosition({ lineNumber: position.lineNumber + 1, column: indent.length + 2 })
+  })
+
+  return () => disposable.dispose()
 }
 
 export function registerLatexLanguage(monaco: typeof Monaco) {
