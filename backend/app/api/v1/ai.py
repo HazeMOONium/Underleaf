@@ -22,7 +22,6 @@ SYSTEM_PROMPT = (
     "When suggesting LaTeX code, ensure it is syntactically correct and follows best practices."
 )
 
-MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1024
 
 
@@ -56,37 +55,48 @@ def _build_user_message(req: AIAssistRequest) -> str:
         )
 
 
-async def _stream_anthropic(req: AIAssistRequest, api_key: str):
-    """Yield SSE chunks from the Anthropic streaming API."""
+async def _stream_deepseek(req: AIAssistRequest, settings):
+    """Yield SSE chunks from the DeepSeek streaming API (OpenAI-compatible)."""
     try:
-        import anthropic
+        from openai import AsyncOpenAI
     except ImportError:
-        yield f"data: {json.dumps({'error': 'anthropic package not installed'})}\n\n"
+        yield f"data: {json.dumps({'error': 'openai package not installed'})}\n\n"
         return
 
-    client = anthropic.AsyncAnthropic(api_key=api_key)
+    client = AsyncOpenAI(
+        api_key=settings.DEEPSEEK_API_KEY,
+        base_url=settings.DEEPSEEK_BASE_URL,
+    )
     user_message = _build_user_message(req)
 
     try:
-        async with client.messages.stream(
-            model=MODEL,
+        stream = await client.chat.completions.create(
+            model=settings.DEEPSEEK_MODEL,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-        ) as stream:
-            async for text_chunk in stream.text_stream:
-                yield f"data: {json.dumps({'text': text_chunk})}\n\n"
-                await asyncio.sleep(0)  # yield control to event loop
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            stream=True,
+        )
+
+        async for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                yield f"data: {json.dumps({'text': delta.content})}\n\n"
+                await asyncio.sleep(0)
 
         yield f"data: {json.dumps({'done': True})}\n\n"
 
-    except anthropic.AuthenticationError:
-        yield f"data: {json.dumps({'error': 'Invalid ANTHROPIC_API_KEY. Check your .env file.'})}\n\n"
-    except anthropic.RateLimitError:
-        yield f"data: {json.dumps({'error': 'Rate limit exceeded. Please wait a moment.'})}\n\n"
     except Exception as exc:
-        logger.error(f"AI assist error: {exc}")
-        yield f"data: {json.dumps({'error': f'AI request failed: {str(exc)[:200]}'})}\n\n"
+        error_str = str(exc)
+        if "authentication" in error_str.lower() or "api key" in error_str.lower():
+            yield f"data: {json.dumps({'error': 'Invalid DEEPSEEK_API_KEY. Check your .env file.'})}\n\n"
+        elif "rate" in error_str.lower() and "limit" in error_str.lower():
+            yield f"data: {json.dumps({'error': 'Rate limit exceeded. Please wait a moment.'})}\n\n"
+        else:
+            logger.error(f"AI assist error: {exc}")
+            yield f"data: {json.dumps({'error': f'AI request failed: {error_str[:200]}'})}\n\n"
 
 
 @router.post("/assist")
@@ -95,14 +105,14 @@ async def ai_assist(
     current_user: User = Depends(get_current_user),
 ):
     settings = get_settings()
-    if not settings.ANTHROPIC_API_KEY:
+    if not settings.DEEPSEEK_API_KEY:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AI feature not configured. Set ANTHROPIC_API_KEY in your environment.",
+            detail="AI feature not configured. Set DEEPSEEK_API_KEY in your environment.",
         )
 
     return StreamingResponse(
-        _stream_anthropic(req, settings.ANTHROPIC_API_KEY),
+        _stream_deepseek(req, settings),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
