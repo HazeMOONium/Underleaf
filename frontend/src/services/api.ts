@@ -221,6 +221,14 @@ export const snapshotsApi = {
 
   delete: (projectId: string, snapshotId: string) =>
     api.delete(`/projects/${projectId}/snapshots/${snapshotId}`),
+
+  restore: (projectId: string, snapshotId: string) =>
+    api.post(`/projects/${projectId}/snapshots/${snapshotId}/restore`),
+
+  getSource: (projectId: string, snapshotId: string) =>
+    api.get<{ files: { path: string; content: string }[] }>(
+      `/projects/${projectId}/snapshots/${snapshotId}/source`
+    ),
 }
 
 export const commentsApi = {

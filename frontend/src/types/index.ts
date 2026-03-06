@@ -44,6 +44,8 @@ export interface Snapshot {
   compile_job_id: string
   label: string | null
   artifact_ref: string | null
+  created_by: string | null
+  creator_email: string | null
   created_at: string
 }
 
