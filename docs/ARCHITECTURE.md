@@ -33,10 +33,11 @@ This document describes the system design of Underleaf.
 │                   │      │                     │
 │ Auth, CRUD        │      │ Yjs document sync   │
 │ Compile jobs      │      │ Presence / cursors  │
+│ Snapshots         │      │ Redis pub/sub relay │
 │ File management   │      │                     │
 └──┬────┬────┬──────┘      └──────────┬──────────┘
    │    │    │                        │
-   │    │    │  AMQP                  │ Redis snapshots
+   │    │    │  AMQP                  │ Redis pub/sub + snapshots
    │    │    └──────────────┐         │
    │    │                   ▼         ▼
    │    │          ┌───────────┐  ┌───────┐
@@ -44,19 +45,20 @@ This document describes the system design of Underleaf.
    │    │          └─────┬─────┘  └───────┘
    │    │                │
    │    │                ▼
-   │    │        ┌──────────────┐
-   │    │        │ Worker        │
-   │    │        │ pdflatex/     │
-   │    │        │ xelatex/      │
-   │    │        │ lualatex      │
-   │    │        └──────┬────────┘
-   │    │               │ PDF upload
+   │    │        ┌──────────────────┐
+   │    │        │ Worker pool       │
+   │    │        │ (N threads)       │
+   │    │        │ pdflatex/         │
+   │    │        │ xelatex/          │
+   │    │        │ lualatex/latexmk  │
+   │    │        └──────┬────────────┘
+   │    │               │ PDF + .synctex.gz upload
    │    │               ▼
    │    └──────────► MinIO (S3)
-   │                (files + PDFs)
+   │                (files + PDFs + SyncTeX)
    ▼
 PostgreSQL
-(metadata, auth, jobs)
+(metadata, auth, jobs, snapshots)
 ```
 
 ---
@@ -66,48 +68,57 @@ PostgreSQL
 ### Frontend (`frontend/`)
 
 - **Framework**: React 18 + TypeScript, Vite 5
-- **Editor**: Monaco Editor with custom LaTeX language registration, `\ref`/`\cite` completions, environment autocomplete
+- **Editor**: Monaco Editor with custom LaTeX language registration, `\ref`/`\cite` completions, environment autocomplete, duplicate `\label` diagnostics, spell check via Web Worker (nspell), Vim/Emacs keybinding modes
 - **Collaboration**: `y-websocket` provider + `y-monaco` `MonacoBinding` for CRDT-backed editing
 - **State**: Zustand for auth; TanStack React Query for server state (projects, files, compile jobs)
-- **Routing**: React Router v6 — `/login`, `/register`, `/`, `/projects/:id`, `/profile`, `/verify-email`
+- **Routing**: React Router v6 — `/login`, `/register`, `/`, `/projects/:id`, `/profile`, `/verify-email`, `/auth/callback`
 - **PDF viewer**: `pdfjs-dist` v5 embedded directly (no iframe) for zoom, text selection, and SyncTeX double-click
-- **API client**: Axios with JWT Bearer interceptor (`services/api.ts`)
+- **API client**: Axios with JWT Bearer interceptor and 401 refresh-token retry queue (`services/api.ts`)
 
 Key components:
 | Component | Purpose |
 |-----------|---------|
-| `EditorPage.tsx` | Main editor: file tree, Monaco, PDF panel, compile output |
-| `DashboardPage.tsx` | Project list with search, create, delete, rename, ZIP export |
-| `FileTree.tsx` | Nested file browser with `@dnd-kit` drag-and-drop |
+| `EditorPage.tsx` | Main editor: file tree, Monaco, PDF panel, compile output, history tab |
+| `DashboardPage.tsx` | Project list with search, create from template, delete, rename, ZIP export |
+| `FileTree.tsx` | Nested file browser with `@dnd-kit` drag-and-drop, context menu, multipart upload |
 | `DocumentOutline.tsx` | Live LaTeX section outline with click-to-navigate |
-| `AIPanel.tsx` | Claude AI assistant panel (error explain, completions, rewrite) |
+| `AIPanel.tsx` | Claude AI assistant panel (error explain, completions, rewrite, SSE streaming) |
+| `ProfilePage.tsx` | Change password, TOTP 2FA setup (QR code), connected OAuth providers |
+| `OAuthCallbackPage.tsx` | Handles OAuth redirect, exchanges token, redirects to dashboard |
+| `spellChecker.ts` | Main-thread spell check orchestrator (debounce, markers, CodeActions) |
+| `spellCheckWorker.ts` | Web Worker: loads nspell dictionary, checks words, returns markers |
+| `latexTextExtractor.ts` | Strips LaTeX markup to isolate prose text for spell checking |
 
 ### Backend (`backend/app/`)
 
 - **Framework**: FastAPI with async SQLAlchemy 2.0 (asyncpg driver), Pydantic v2
 - **Entry point**: `main.py` — CORS, request logging, Prometheus metrics middleware, route registration
-- **Auth**: JWT HS256 via `python-jose`, bcrypt password hashing via `passlib`
+- **Auth**: JWT HS256 via `python-jose`, bcrypt password hashing via `passlib`; TOTP via `pyotp`
 - **API routes** in `api/v1/`:
-  - `auth.py` — register, verify email, login, me, change password, forgot/reset password
-  - `projects.py` — project CRUD + file CRUD + ZIP export
-  - `compile.py` — job submit, status, artifact, SyncTeX, logs
+  - `auth.py` — register, verify email, login, me, change password, forgot/reset password, JWT refresh, 2FA (enable/verify/disable/login), OAuth (redirect + callback)
+  - `projects.py` — project CRUD + file CRUD + ZIP export + template creation
+  - `compile.py` — job submit, status, artifact, artifact-url, SyncTeX, logs
   - `members.py` — RBAC member management
   - `invites.py` — shareable invite links
-  - `comments.py` — threaded file-anchored comments
+  - `comments.py` — threaded file-anchored comments with email notifications
   - `ai.py` — Claude API proxy with streaming SSE
+  - `snapshots.py` — version history: list, stream artifact, rename label, delete
 
 ### Collab Server (`collab-server/src/server.ts`)
 
 - **Runtime**: Node.js with `y-websocket` WebSocket server
 - **Document scope**: one `Y.Doc` per `project-{id}` room; texts keyed by file path (`ydoc.getText(filePath)`)
 - **Redis persistence**: on client connect, restore snapshot; on disconnect / every 60 seconds, snapshot to Redis key `ydoc:{roomName}`; graceful-shutdown flush
+- **Horizontal scaling**: Redis pub/sub relay — each instance subscribes to a per-room channel and re-broadcasts Yjs updates to other instances. An `origin='redis-relay'` sentinel prevents re-publication loops. Uses 3 separate Redis clients: persistence, pub, sub.
 - **Port**: 1234 (dev), 11234 (Docker)
 
 ### Worker (`worker/compile-worker.py`)
 
+- **Pool**: `WORKER_CONCURRENCY` threads (default 2), each with its own RabbitMQ connection and channel; pre-warmed at startup for zero cold-start on new jobs
 - **Queue**: consumes AMQP messages from `compile_jobs` queue
 - **Sandbox**: unprivileged user (UID 1001), 120-second timeout, `\write18` disabled
-- **Flow**: download all project files from MinIO → run `pdflatex -synctex=1 -interaction=nonstopmode` → upload PDF + `.synctex.gz` to MinIO → update job status in PostgreSQL via REST call to backend → acknowledge message
+- **Per-job isolation**: each job writes to `OUTPUT_DIR/{job_id}/` to prevent concurrent-job file races
+- **Flow**: download all project files from MinIO → run engine (`pdflatex`/`xelatex`/`lualatex` with `-synctex=1 -interaction=nonstopmode`, or `latexmk`) → upload PDF + `.synctex.gz` to MinIO → update job status in PostgreSQL via REST call to backend → acknowledge message
 - **Error handling**: structured error extraction from pdflatex stdout (file, line, message)
 
 ---
@@ -120,14 +131,27 @@ Key components:
 |--------|------|-------|
 | `id` | UUID | Primary key |
 | `email` | String | Unique |
-| `hashed_password` | String | bcrypt |
+| `hashed_password` | String | bcrypt (nullable for pure-OAuth accounts) |
 | `role` | Enum | `user` \| `admin` |
 | `is_active` | Boolean | Default true |
 | `email_verified` | Boolean | Default false |
 | `verification_token` | String | Nullable |
 | `reset_token` | String | Nullable |
 | `reset_token_expires` | DateTime | Nullable |
+| `totp_secret` | String | Nullable; base32 TOTP secret |
+| `totp_enabled` | Boolean | Default false |
+| `oauth_provider` | String | Nullable; `google` or `github` |
+| `oauth_provider_id` | String | Nullable; provider user ID |
 | `created_at` | DateTime | |
+
+### TotpBackupCodes
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | UUID | Primary key |
+| `user_id` | UUID | FK → Users |
+| `code_hash` | String | bcrypt-hashed backup code |
+| `used` | Boolean | Default false |
 
 ### Projects
 
@@ -136,6 +160,7 @@ Key components:
 | `id` | UUID | Primary key |
 | `title` | String | |
 | `owner_id` | UUID | FK → Users |
+| `engine` | String | `pdflatex` / `xelatex` / `lualatex` / `latexmk`; default `pdflatex` |
 | `created_at` | DateTime | |
 
 ### ProjectFiles
@@ -195,13 +220,27 @@ The project owner always has implicit `owner` access; `Permissions` rows cover n
 | `project_id` | UUID | FK → Projects |
 | `requester_id` | UUID | FK → Users |
 | `status` | Enum | `pending` \| `running` \| `completed` \| `failed` |
-| `engine` | String | `pdflatex` / `xelatex` / `lualatex` |
+| `engine` | String | `pdflatex` / `xelatex` / `lualatex` / `latexmk` |
+| `draft` | Boolean | Draft mode (skips PDF generation) |
 | `pdf_key` | String | MinIO key for PDF |
 | `synctex_key` | String | MinIO key for `.synctex.gz` |
 | `log_output` | Text | Raw pdflatex stdout |
 | `error_message` | String | Extracted error |
 | `duration_seconds` | Float | |
 | `created_at` / `finished_at` | DateTime | |
+
+### Snapshots
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | UUID | Primary key |
+| `project_id` | UUID | FK → Projects |
+| `compile_job_id` | UUID | FK → CompileJobs; unique constraint (idempotent) |
+| `label` | String | Human-readable name; defaults to timestamp |
+| `artifact_ref` | String | MinIO key for the PDF |
+| `created_at` | DateTime | |
+
+Snapshots are auto-created in `GET /compile/jobs/:id/status` when the job transitions to COMPLETED. The unique constraint on `compile_job_id` makes concurrent creation idempotent.
 
 ---
 
@@ -211,11 +250,42 @@ The project owner always has implicit `owner` access; `Permissions` rows cover n
 
 ```
 POST /api/v1/auth/login
-  → validate email + bcrypt password
-  → issue HS256 JWT (24h default)
-  → client stores token in localStorage
-  → all requests: Authorization: Bearer <token>
+  → validate email + bcrypt password (+ TOTP code if 2FA enabled)
+  → issue HS256 access token (15 min, in response body)
+  → issue refresh token (30 days, in httpOnly cookie "refresh_token")
+  → store refresh token in Redis: refresh_token:{token} → user_id (TTL=30d)
+
+All requests: Authorization: Bearer <access_token>
+
+POST /api/v1/auth/refresh
+  → read refresh token from httpOnly cookie
+  → validate against Redis
+  → rotate: delete old Redis key, issue new access token + refresh token
+  → Axios 401 interceptor queues concurrent 401s while refresh in flight
 ```
+
+### Two-factor authentication (TOTP)
+
+```
+POST /auth/2fa/enable  → generate TOTP secret, return base32 + QR URI
+POST /auth/2fa/verify  → confirm setup with a live TOTP code; activate 2FA; return backup codes
+POST /auth/2fa/disable → disable with current TOTP code
+POST /auth/2fa/login   → exchange session_token (from password login) + TOTP code for JWT
+```
+
+When 2FA is enabled, `POST /auth/login` responds with `{requires_2fa: true, session_token: "..."}` instead of a JWT. The frontend routes to the TOTP step.
+
+### OAuth / SSO
+
+```
+GET /auth/oauth/{provider}           → redirect to Google/GitHub with state (CSRF token in Redis)
+GET /auth/oauth/{provider}/callback  → validate state, exchange code for profile
+                                      → find-or-create user by email
+                                      → issue JWT + refresh token
+                                      → redirect to /auth/callback?token=<jwt>
+```
+
+Supported providers: `google`, `github`. State tokens are stored in Redis with a 10-minute TTL.
 
 ### RBAC
 
@@ -252,16 +322,24 @@ When a user opens a file for the first time (CRDT text length = 0), the frontend
 
 ### Presence
 
-User cursors are broadcast via `provider.awareness` with the user's email and a deterministic HSL color (`toHsla(clientId)`). Rendered in Monaco via `beforeContentClassName` CSS spans.
+User cursors are broadcast via `provider.awareness` with the user's email and a deterministic HSL color (`toHsla(clientId)`). Rendered in Monaco via `beforeContentClassName` CSS spans. The presence bar caps at 3 peer avatars + a `+N` overflow badge with a tooltip listing hidden names. Join/leave events fire `react-hot-toast` notifications.
 
 ### Redis persistence
 
 The collab server snapshots each `Y.Doc` as a binary state vector to Redis key `ydoc:{projectId}` on:
 - Client disconnect (if no other clients remain)
-- Every 60 seconds (periodic)
+- Every 60 seconds (periodic timer)
 - SIGTERM / SIGINT (graceful shutdown)
 
 On reconnect, the snapshot is restored before the client completes the sync handshake.
+
+### Horizontal scaling
+
+Multiple collab server instances are supported via Redis pub/sub:
+- Each instance publishes incoming Yjs updates to a per-room Redis channel
+- All instances subscribe and re-broadcast to their local WebSocket clients
+- An `origin='redis-relay'` sentinel on re-broadcast messages prevents looping
+- Three separate Redis clients per process: one for persistence, one for pub, one for sub
 
 ---
 
@@ -283,15 +361,21 @@ Frontend                Backend              RabbitMQ          Worker
    │                      │                     │  download files │
    │                      │                     │  from MinIO     │
    │                      │                     │                 │
-   │                      │                     │  run pdflatex   │
+   │                      │                     │  run engine     │
+   │                      │                     │  (-synctex=1)   │
    │                      │                     │                 │
-   │                      │  PATCH job status   │  upload PDF     │
-   │                      │◄────────────────────┼─────────────────┤
+   │                      │  PATCH job status   │  upload PDF +   │
+   │                      │◄────────────────────┼─.synctex.gz─────┤
    │  status=COMPLETED    │                     │                 │
    │◄─────────────────────┤                     │                 │
+   │  (auto-creates Snapshot)                   │                 │
    │                      │                     │                 │
-   │  GET /jobs/{id}/artifact → redirect to MinIO presigned URL   │
+   │  GET /jobs/{id}/artifact-url → cached presigned MinIO URL    │
 ```
+
+### Compile error linking
+
+Log paths emitted by pdflatex (e.g. `./sections/foo.tex`) are resolved against the project's file tree using `resolveLogFilePath()` — exact match → suffix match → basename match. Matched errors are rendered as clickable links in the output panel that jump the editor to the correct file and line.
 
 ---
 
@@ -304,7 +388,9 @@ Object key convention:
 - Compiled PDFs: `artifacts/{job_id}/output.pdf`
 - SyncTeX files: `artifacts/{job_id}/output.synctex.gz`
 
-File access uses short-lived (15-minute) presigned URLs generated by the backend on demand. No direct MinIO access from browsers.
+**Presigned URL caching**: `minio_service.get_presigned_url_cached()` caches presigned URLs in Redis for 14 minutes (validity window is 15 minutes) to avoid re-signing on every poll cycle. The `GET /compile/jobs/:id/artifact-url` endpoint returns `{url}` for direct browser-to-MinIO streaming when `MINIO_PUBLIC_URL` is set.
+
+**Multipart uploads**: Binary files are uploaded via `POST /projects/:id/files/stream` using `multipart/form-data` (`UploadFile`), which streams directly to MinIO without loading the full file into memory.
 
 ---
 
@@ -324,3 +410,6 @@ Backend tests use `aiosqlite` in-memory databases for isolation and speed. The t
 
 **Monorepo vs multi-repo?**
 Single monorepo keeps all services versioned together, simplifying local development and CI. Each service has its own `Dockerfile` and can be deployed independently.
+
+**Why pre-warmed worker threads?**
+A thread pool (configurable via `WORKER_CONCURRENCY`) eliminates cold-start latency on burst compile requests. Each thread holds its own RabbitMQ connection; per-job `OUTPUT_DIR/{job_id}/` directories prevent file races under concurrency.

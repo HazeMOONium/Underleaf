@@ -2,226 +2,20 @@
 
 This document tracks planned features, quality improvements, and technical debt for Underleaf.
 
-Items are grouped by theme and ordered by priority within each group. Effort estimates assume a single focused developer.
+Items are grouped by theme and ordered by priority within each group.
 
 ---
 
 ## Table of Contents
 
-- [Near-term (next sprint)](#near-term-next-sprint)
-- [Editor improvements](#editor-improvements)
-- [Collaboration](#collaboration)
-- [Auth & access](#auth--access)
-- [Compile pipeline](#compile-pipeline)
-- [Infrastructure & DevOps](#infrastructure--devops)
-- [Performance & scalability](#performance--scalability)
 - [Future / exploratory](#future--exploratory)
-
----
-
-## Near-term (next sprint)
-
-High value, low effort items that can be shipped quickly.
-
-| # | Feature | Effort | Status |
-|---|---------|--------|--------|
-| 1 | **LaTeX engine selector** | S | ✅ Done — migration 004, engine column, PATCH route, worker reads engine |
-| 2 | **Word / character count status bar** | S | ✅ Done — 22px status bar below Monaco, updates on ytext observe |
-| 3 | **Join / leave toasts** | XS | ✅ Done — awareness change handler, tracks names, react-hot-toast |
-| 4 | **New project from template** | S | ✅ Done — 4 templates (article, beamer, report, CV), modal on dashboard |
-| 5 | **New folder button in file tree** | XS | ✅ Done — folder-plus button in sidebar header, modal prompt |
-
----
-
-## Editor improvements
-
-### ~~Spell check~~ ✅ Done
-
-`nspell` (hunspell-compatible JS) in a Web Worker for non-blocking spell checking:
-- `latexTextExtractor.ts` — strips comments, math ($, $$, environments), LaTeX commands; tokenizes remaining prose words with column offsets
-- `spellCheckWorker.ts` — Web Worker: fetches `.aff`/`.dic` from `/public/dictionaries/`, creates nspell instance, checks words, returns markers + suggestions
-- `spellChecker.ts` — main-thread orchestrator: 700ms debounce, `setModelMarkers` (OWNER `spell-check`), CodeActionProvider with replacement suggestions + "Ignore word" quick-fix
-- Status bar toggle (checkbox + locale selector): en-US / en-GB; settings persisted in localStorage
-- Dictionary files: `frontend/public/dictionaries/en-us.{aff,dic}` + `en-gb.{aff,dic}` (copied from `dictionary-en`, `dictionary-en-gb` npm packages)
-
-### ~~Enhanced LaTeX diagnostics~~ ✅ Done
-
-Duplicate `\label` detection added to `registerLatexDiagnostics`. Existing checks already covered: unmatched `\begin/\end`, missing `\end{document}`, unclosed `$$`/`$`.
-
-### ~~File/folder context menu~~ ✅ Done
-
-Right-click context menu (was already partially there). Added:
-- **Duplicate** for files (creates `name-copy.ext` with same content)
-- **Delete All** for folders (deletes all children with confirmation)
-- **⋮ kebab button** on hover for each row (opens same context menu)
-
-### ~~Multi-cursor find & replace~~ ✅ Done
-
-Ctrl+H opens Monaco's built-in find/replace widget. Ctrl+Shift+F opens a custom project-wide
-search overlay — searches all `.tex/.bib/.sty` files, shows file:line:preview results,
-click to navigate. Also reachable from the command added in `handleEditorMount`.
-
-### ~~Vim / Emacs keybindings~~ ✅ Done
-
-Keybinding mode selector (Normal / Vim / Emacs) in the editor header. Preference persisted
-in localStorage. Vim mode uses `monaco-vim` with a status bar indicator in the footer.
-Emacs mode uses `monaco-emacs`.
-
----
-
-## Collaboration
-
-### ~~Snapshot / version history~~ ✅ Done
-
-Each successful compile auto-creates a `Snapshot` record:
-- `Snapshot` model with unique constraint on `compile_job_id` (idempotent creation)
-- Auto-created in `GET /jobs/:id/status` when status transitions to COMPLETED
-- `GET /projects/:id/snapshots` — list in reverse-chronological order
-- `GET /projects/:id/snapshots/:id/artifact` — stream historical PDF
-- `PATCH /projects/:id/snapshots/:id` — rename label (editor role)
-- `DELETE /projects/:id/snapshots/:id` — delete (editor role)
-- History tab in editor output panel: timeline list, View PDF (opens in PDF pane with banner), download, rename (inline click-to-edit), delete
-- Migration 005 with `uq_snapshot_compile_job` unique constraint
-
-### ~~Comment notification emails~~ ✅ Done
-
-Notifications sent via `BackgroundTasks` (no-op when SMTP not configured):
-- New top-level comment → project owner notified
-- Reply → parent comment's author notified
-- Thread resolved → root comment author notified
-
-### ~~Presence improvements~~ ✅ Done
-
-Presence bar capped at 3 peer avatars + overflow `+N` badge with tooltip listing hidden names.
-
----
-
-## Auth & access
-
-### ~~JWT refresh tokens~~ ✅ Done
-
-Access tokens reduced to 15 min; long-lived refresh tokens (30 days) in httpOnly cookie.
-`POST /auth/refresh` rotates the token. Axios interceptor retries on 401 with queuing.
-CORS updated to specific origins (required for `withCredentials`).
-
-### Two-factor authentication (TOTP)
-
-Add TOTP-based 2FA:
-
-- `POST /auth/2fa/enable` — generate TOTP secret + QR code
-- `POST /auth/2fa/verify` — confirm setup with a code
-- Login flow: after password, prompt for 6-digit TOTP code if 2FA enabled
-- Backup codes (10 single-use codes)
-- **Effort**: L (6–8h)
-
-### OAuth / SSO login
-
-Add Google and GitHub OAuth2 login:
-
-- Redirect to provider → callback → create/link account
-- Store provider + provider user ID in Users table
-- Allow linking multiple providers to one account
-- **Effort**: L (6–8h)
-
----
-
-## Compile pipeline
-
-### Pre-warmed worker pool
-
-Current architecture: one worker container, cold start per job. Improve:
-
-- Keep N worker containers alive (configurable pool size)
-- Workers listen on the queue and process jobs immediately (no container spin-up delay)
-- Scale pool based on queue depth (auto-scaling via Docker API or Kubernetes HPA)
-- **Effort**: L (8–12h)
-
-### ~~Compile with bibliography (latexmk)~~ ✅ Done
-
-Worker detects `latexmk` availability at runtime (`shutil.which`) and uses it when present (`-pdf`/`-xelatex`/`-lualatex` flags). Falls back to direct engine invocation otherwise.
-
-### Compile error linking to files
-
-When parsing structured errors from pdflatex output, resolve relative file paths (e.g. `./sections/intro.tex`) to the project's file tree. Show clickable file:line links in the error panel that navigate the editor to the error location.
-
-Currently partial — implement full resolution for multi-file projects.
-
-- **Effort**: S (2–3h)
-
-### ~~Draft / fast compile mode~~ ✅ Done
-
-"Draft" button added to editor header — sends `draft: true` flag, worker passes `-draftmode` to the engine for fast syntax checking without PDF generation.
-
----
-
-## Infrastructure & DevOps
-
-### ~~Structured JSON logging~~ ✅ Done
-
-`JSONFormatter` emits all extra fields as top-level JSON keys (`method`, `path`, `status`, `duration` ms, `request_id`). `LoggingMiddleware` logs a clean `"request"` message with structured extras.
-
-### ~~Prometheus metrics dashboard~~ ✅ Done
-
-`deploy/grafana/dashboards/underleaf.json` — pre-built dashboard with panels:
-request rate, p50/p95/p99 latency, error rate, compile throughput, stat tiles.
-Prometheus (port 19090) and Grafana (port 13000) added to `docker-compose.dev.yml`.
-Grafana auto-provisions the datasource and dashboard on startup.
-
-### ~~Production Docker Compose hardening~~ ✅ Done
-
-Created `deploy/docker-compose.prod.yml` with:
-- `restart: always` on all services
-- Non-root users (`user: "1000:1000"` for backend, UID 1001 already in worker Dockerfile)
-- `read_only: true` + tmpfs for PostgreSQL
-- Resource limits (`memory` + `cpus`) on every service
-- Required secrets validated at startup (`${VAR:?msg}` syntax)
-- No source bind mounts (uses pre-built images)
-
-### Kubernetes Helm chart
-
-For teams wanting to deploy to Kubernetes:
-
-- Helm chart with configurable replicas, ingress, TLS, persistent volumes
-- HPA for backend and worker pods
-- NetworkPolicy to restrict pod-to-pod traffic
-- **Effort**: XL (16–24h)
-
----
-
-## Performance & scalability
-
-### ~~Backend connection pooling~~ ✅ Done
-
-`database.py` now uses `pool_size=10`, `max_overflow=20`, `pool_timeout=30`, `pool_pre_ping=True`.
-
-### MinIO multipart uploads
-
-For large files (images, fonts > 5MB), use MinIO's multipart upload API instead of loading the entire file into memory. This reduces backend peak memory usage.
-
-- **Effort**: S (2–3h)
-
-### ~~CDN / object storage presigned URL caching~~ ✅ Done
-
-`minio_service.get_presigned_url_cached()` caches presigned URLs in Redis for 14 min
-(validity is 15 min) to avoid re-signing on every request. New endpoint
-`GET /compile/jobs/:id/artifact-url` returns `{url}` for direct browser → MinIO streaming.
-Requires `MINIO_PUBLIC_URL` env var; falls back gracefully to blob streaming otherwise.
-Dev compose sets `MINIO_PUBLIC_URL=http://localhost:19000`.
-
-### Collab server horizontal scaling
-
-The current Yjs WebSocket server is single-process. For multiple instances:
-
-- Use `y-redis` (official package) to synchronize `Y.Doc` state across multiple collab server instances via Redis pub/sub
-- Each instance reads/writes from the same Redis cluster
-- Enables load balancing WebSocket connections across instances
-- **Effort**: M (3–5h)
+- [Completed features](#completed-features)
 
 ---
 
 ## Future / exploratory
 
-These are larger or more speculative features for later consideration.
+All originally planned roadmap items are complete. The following are larger or more speculative features for later consideration.
 
 | Feature | Description |
 |---------|-------------|
@@ -234,43 +28,88 @@ These are larger or more speculative features for later consideration.
 | **Quotas & billing** | Per-user or per-team storage and compile quotas. Usage dashboards. Optional Stripe billing for hosted deployments. |
 | **SAML / LDAP SSO** | Enterprise SSO integration for institutional deployments. |
 | **Mobile app** | Read-only viewer and lightweight editing for tablets via a React Native wrapper. |
+| **Electron desktop app** | Offline-capable desktop wrapper with local compile fallback. |
 
 ---
 
 ## Completed features
 
-For reference, major features already shipped:
+All features below have been implemented and are available in the current release.
 
-- JWT auth, email verification, forgot/reset password, change password, profile page
-- Project CRUD with file management (create, read, update, delete, rename, ZIP export)
-- Monaco Editor with LaTeX syntax highlighting, `\ref`/`\cite`/environment autocomplete
-- Real-time collaboration: Yjs CRDT + y-monaco + collab cursors + presence
-- Yjs Redis persistence (on-connect restore, 60s periodic snapshots, graceful shutdown)
-- Role-based access: owner / editor / commenter / viewer
-- Invite links (token-based, expiry, max uses)
-- Threaded comments anchored to file:line
-- Compile pipeline: RabbitMQ → worker → pdflatex → MinIO PDF
-- SyncTeX: source ↔ PDF bidirectional navigation (double-click in PDF → jump to editor line)
-- pdfjs-dist v5 PDF viewer with zoom, text selection, Ctrl+scroll zoom
-- Structured compile error parsing: clickable file:line jumps in output panel
-- Compile duration display, PDF download button, ZIP export
-- Drag-and-drop file upload (text and binary)
-- File tree drag-and-drop reorganization (`@dnd-kit`)
-- AI assistant panel (Claude API: error explainer, completions, rewrite)
-- Document outline panel (section/subsection navigation)
-- Health (`/health`) and readiness (`/ready`) endpoints
-- GitHub Actions CI (backend pytest + black + flake8; frontend tsc + eslint)
-- 138-test backend test suite covering all API surface areas
-- **LaTeX engine selector** — pdflatex / xelatex / lualatex per project (migration 004)
-- **Word / character count status bar** — live counts below Monaco editor
-- **Join / leave toasts** — react-hot-toast on collaborator join/leave via Yjs awareness
-- **New project from template** — 4 built-in templates on dashboard
-- **New folder button** — folder-plus in sidebar, `.gitkeep` pattern
-- **latexmk integration** — worker uses latexmk when available, falls back to direct engine
-- **Draft compile mode** — "Draft" button in header, `-draftmode` flag skips PDF generation
-- **Duplicate `\label` diagnostics** — Monaco squiggle for duplicate label keys
-- **Presence overflow badge** — `+N` avatar badge when >3 collaborators online
-- **Structured JSON logging** — all request fields as top-level JSON keys (`method`, `path`, `status`, `duration`)
-- **SQLAlchemy connection pool** — `pool_size=10`, `max_overflow=20`, `pool_timeout=30`
-- **Snapshot / version history** — auto-created per compile, History tab in editor with View PDF, download, rename, delete
-- **Spell check** — nspell Web Worker, en-US/en-GB dictionaries, LaTeX-aware text extractor, quick-fix suggestions + ignore, status-bar toggle
+### Auth & access
+- ✅ JWT auth — HS256 access tokens (15 min), httpOnly refresh tokens (30 days), Axios 401 interceptor with request queue
+- ✅ Email verification on register
+- ✅ Forgot / reset password
+- ✅ Change password
+- ✅ Profile / settings page
+- ✅ Role-based access control — owner / editor / commenter / viewer
+- ✅ Invite links — token-based, configurable expiry and max-uses
+- ✅ **Two-factor authentication (TOTP)** — pyotp, QR code setup in ProfilePage, backup codes, 2FA login step (migration 006)
+- ✅ **OAuth / SSO** — Google + GitHub; state CSRF via Redis; find-or-create by email; OAuthCallbackPage (migration 007)
+
+### Editor quality
+- ✅ Monaco editor with LaTeX syntax highlighting and `\ref`/`\cite`/environment autocomplete
+- ✅ Document outline panel (section/subsection navigation)
+- ✅ Word / character count status bar
+- ✅ Duplicate `\label` diagnostics (Monaco squiggle)
+- ✅ Enhanced LaTeX diagnostics — unmatched `\begin/\end`, missing `\end{document}`, unclosed `$$`/`$`
+- ✅ **Spell check** — nspell Web Worker, en-US/en-GB dictionaries, LaTeX-aware text extractor, CodeAction quick-fix suggestions + "Ignore word", status-bar toggle + locale selector
+- ✅ **Vim / Emacs keybindings** — mode selector in editor header, localStorage-persisted, vim status bar
+- ✅ **Project-wide search** — Ctrl+Shift+F overlay, searches all `.tex/.bib/.sty` files, click to navigate
+
+### File management
+- ✅ Drag-and-drop file upload (text + binary base64)
+- ✅ **Multipart uploads** — `POST /projects/:id/files/stream` for large binary files; frontend uses `FormData`
+- ✅ New project from template — 4 built-in templates (article, beamer, report, CV)
+- ✅ New folder button — folder-plus in sidebar, `.gitkeep` pattern
+- ✅ File/folder context menu — right-click + ⋮ kebab: rename, delete, download, duplicate
+- ✅ Duplicate file
+- ✅ Delete folder (with confirmation)
+- ✅ File tree drag-and-drop reorganization (`@dnd-kit`)
+- ✅ ZIP export
+
+### Collaboration
+- ✅ Real-time CRDT editing — Yjs + y-monaco + MonacoBinding
+- ✅ Collab cursors — `beforeContentClassName` CSS spans
+- ✅ Presence indicators — colored avatars with initials
+- ✅ **Presence overflow** — `+N` badge when >3 collaborators online, tooltip with hidden names
+- ✅ **Join / leave toasts** — `react-hot-toast` on awareness change
+- ✅ Threaded comments anchored to file:line (create, reply, resolve, delete)
+- ✅ Comment notification emails — new comment → owner; reply → parent author; resolved → root author
+- ✅ Yjs Redis persistence — on-connect restore, 60s periodic snapshots, graceful-shutdown flush
+- ✅ **Collab horizontal scaling** — Redis pub/sub relay; `origin='redis-relay'` sentinel; 3 Redis clients per process
+
+### Compile pipeline
+- ✅ Compile pipeline — RabbitMQ → worker → pdflatex → MinIO PDF
+- ✅ **Engine selector** — pdflatex / xelatex / lualatex / latexmk per project (migration 004)
+- ✅ **Draft compile mode** — "Draft" button sends `-draftmode` flag for fast syntax checking
+- ✅ latexmk integration — worker uses latexmk when available, falls back to direct engine
+- ✅ SyncTeX — `-synctex=1` flag; `.synctex.gz` upload; source ↔ PDF bidirectional navigation
+- ✅ Structured compile error parsing — file:line extraction, clickable jumps in output panel
+- ✅ **Compile error path resolution** — `resolveLogFilePath()` resolves `./sections/foo.tex` log paths against the project file tree (exact → suffix → basename)
+- ✅ Compile duration display in logs tab
+- ✅ **Snapshot / version history** — auto-created per COMPLETED job; History tab (view PDF, download, rename label, delete); migration 005
+
+### PDF viewer
+- ✅ pdfjs-dist v5 embedded viewer (replaced iframe)
+- ✅ Zoom (Ctrl+scroll)
+- ✅ Text selection
+- ✅ SyncTeX double-click PDF → editor line
+- ✅ Forward sync editor cursor → PDF highlight
+
+### Infrastructure & DevOps
+- ✅ Health (`/health`) and readiness (`/ready`) endpoints
+- ✅ Structured JSON logging — all request fields as top-level JSON keys
+- ✅ SQLAlchemy connection pool — `pool_size=10`, `max_overflow=20`, `pool_pre_ping=True`
+- ✅ MinIO presigned URL caching — `get_presigned_url_cached()`, Redis 14-min TTL; `GET /compile/jobs/:id/artifact-url`
+- ✅ **Multipart MinIO uploads** — `upload_file_stream()` streams directly without loading into memory
+- ✅ GitHub Actions CI — backend pytest + black + flake8; frontend tsc + eslint; 18 Playwright E2E tests
+- ✅ Prometheus + Grafana — auto-provisioned in dev compose; pre-built dashboard (request rate, latency, error rate, compile throughput)
+- ✅ Production Docker Compose hardening — `restart: always`, non-root users, `read_only: true`, resource limits, required-secret validation
+- ✅ Production Dockerfiles — frontend multi-stage (node:20 build → nginx:1.25-alpine), collab-server (node:18-alpine tsc build)
+- ✅ **Pre-warmed worker pool** — `WORKER_CONCURRENCY` threads, each with own RabbitMQ connection; per-job `OUTPUT_DIR/{job_id}/` to prevent concurrent file races
+- ✅ **Kubernetes Helm chart** — `deploy/helm/underleaf/`; 8 services (PostgreSQL/Redis/MinIO/RabbitMQ StatefulSets + Backend/Collab/Worker/Frontend Deployments); nginx Ingress; backend init containers for wait-for-deps + `alembic upgrade head`; all secrets via K8s Secret
+
+### AI
+- ✅ AI assistant panel — Claude API (explain error, completions, rewrite selection), streaming SSE
+- ✅ Error explainer auto-triggers after failed compile

@@ -14,6 +14,7 @@ Interactive documentation is available at `http://localhost:18000/docs` (Swagger
 - [Projects](#projects)
 - [Files](#files)
 - [Compile](#compile)
+- [Snapshots](#snapshots)
 - [Members](#members)
 - [Invites](#invites)
 - [Comments](#comments)
@@ -65,12 +66,38 @@ Verify email address using the token from the verification email.
 
 ### POST /auth/login
 
-Authenticate and receive a JWT access token.
+Authenticate and receive a JWT access token. Sets an httpOnly `refresh_token` cookie.
+
+If the account has 2FA enabled, returns a session token instead of a JWT.
 
 **Request body** (form data or JSON)
 ```json
 { "username": "user@example.com", "password": "yourpassword" }
 ```
+
+**Response** `200` — 2FA disabled
+```json
+{
+  "access_token": "eyJ...",
+  "token_type": "bearer"
+}
+```
+
+**Response** `200` — 2FA enabled
+```json
+{
+  "requires_2fa": true,
+  "session_token": "short-lived-session-token"
+}
+```
+
+---
+
+### POST /auth/refresh
+
+Rotate the refresh token and issue a new access token. Reads the refresh token from the httpOnly `refresh_token` cookie.
+
+**Auth**: cookie only (no Bearer header required)
 
 **Response** `200`
 ```json
@@ -78,6 +105,22 @@ Authenticate and receive a JWT access token.
   "access_token": "eyJ...",
   "token_type": "bearer"
 }
+```
+
+**Errors**
+- `401` — missing, invalid, or expired refresh token
+
+---
+
+### POST /auth/logout
+
+Revoke the current refresh token and clear the cookie.
+
+**Auth**: required
+
+**Response** `200`
+```json
+{ "message": "Logged out successfully" }
 ```
 
 ---
@@ -96,6 +139,7 @@ Get the currently authenticated user.
   "role": "user",
   "is_active": true,
   "email_verified": true,
+  "totp_enabled": false,
   "created_at": "2026-01-01T00:00:00Z"
 }
 ```
@@ -159,6 +203,109 @@ Reset password using the token from the reset email.
 
 ---
 
+### POST /auth/2fa/enable
+
+Generate a TOTP secret and return a QR code URI. 2FA is not yet active until verified.
+
+**Auth**: required
+
+**Response** `200`
+```json
+{
+  "secret": "BASE32SECRET",
+  "qr_uri": "otpauth://totp/Underleaf:user@example.com?secret=...&issuer=Underleaf"
+}
+```
+
+---
+
+### POST /auth/2fa/verify
+
+Confirm 2FA setup by submitting a live TOTP code. Activates 2FA and returns one-time backup codes.
+
+**Auth**: required
+
+**Request body**
+```json
+{ "code": "123456" }
+```
+
+**Response** `200`
+```json
+{
+  "message": "2FA enabled",
+  "backup_codes": ["abc123", "def456", "..."]
+}
+```
+
+**Errors**
+- `400` — invalid TOTP code
+
+---
+
+### POST /auth/2fa/disable
+
+Disable 2FA. Requires a valid TOTP code or backup code.
+
+**Auth**: required
+
+**Request body**
+```json
+{ "code": "123456" }
+```
+
+**Response** `200`
+```json
+{ "message": "2FA disabled" }
+```
+
+---
+
+### POST /auth/2fa/login
+
+Exchange the session token (from a 2FA-gated login) + TOTP code for a full JWT.
+
+**Request body**
+```json
+{ "session_token": "...", "code": "123456" }
+```
+
+**Response** `200`
+```json
+{
+  "access_token": "eyJ...",
+  "token_type": "bearer"
+}
+```
+
+**Errors**
+- `401` — invalid or expired session token
+- `400` — invalid TOTP code
+
+---
+
+### GET /auth/oauth/{provider}
+
+Initiate OAuth login. Redirects the browser to the provider's authorization page.
+
+Supported providers: `google`, `github`
+
+**Response** `302` — redirect to provider
+
+---
+
+### GET /auth/oauth/{provider}/callback
+
+OAuth callback endpoint. Validates state, exchanges the authorization code for a user profile, finds or creates a local account, and issues a JWT.
+
+**Response** `302` — redirect to `/auth/callback?token=<jwt>`
+
+**Errors**
+- `400` — invalid or missing state parameter
+- `500` — provider API error
+
+---
+
 ## Projects
 
 ### GET /projects
@@ -174,6 +321,7 @@ List all projects accessible to the authenticated user (owned + shared).
     "id": "uuid",
     "title": "My Paper",
     "owner_id": "uuid",
+    "engine": "pdflatex",
     "created_at": "2026-01-01T00:00:00Z"
   }
 ]
@@ -183,14 +331,16 @@ List all projects accessible to the authenticated user (owned + shared).
 
 ### POST /projects
 
-Create a new project. Creates a default `main.tex` with a minimal LaTeX template.
+Create a new project. Optionally create from a built-in template.
 
 **Auth**: required
 
 **Request body**
 ```json
-{ "title": "My New Project" }
+{ "title": "My New Project", "template": "article" }
 ```
+
+`template` is optional. Available values: `article`, `beamer`, `report`, `cv`. Defaults to a minimal blank template.
 
 **Response** `201` — same shape as GET /projects item
 
@@ -208,14 +358,16 @@ Get a single project by ID.
 
 ### PATCH /projects/{project_id}
 
-Rename a project.
+Update project title or engine.
 
 **Auth**: required (owner only)
 
-**Request body**
+**Request body** (all fields optional)
 ```json
-{ "title": "Updated Title" }
+{ "title": "Updated Title", "engine": "xelatex" }
 ```
+
+Available engines: `pdflatex`, `xelatex`, `lualatex`, `latexmk`
 
 **Response** `200` — updated project
 
@@ -223,7 +375,7 @@ Rename a project.
 
 ### DELETE /projects/{project_id}
 
-Delete a project and all its files, jobs, permissions, and MinIO objects.
+Delete a project and all its files, jobs, snapshots, permissions, and MinIO objects.
 
 **Auth**: required (owner only)
 
@@ -300,6 +452,20 @@ Upload a binary file (images, fonts, etc.) encoded as base64.
 
 ---
 
+### POST /projects/{project_id}/files/stream
+
+Upload a binary file via multipart form data. Preferred for large files (>5 MB).
+
+**Auth**: required (editor+ role)
+
+**Request**: `multipart/form-data`
+- `file` — the file to upload
+- `path` — destination path in the project
+
+**Response** `200` — file metadata object
+
+---
+
 ### GET /projects/{project_id}/files/{file_path}
 
 Read the content of a text file, or get a presigned download URL for binary files.
@@ -350,8 +516,10 @@ Submit a new compile job for a project.
 
 **Request body**
 ```json
-{ "project_id": "uuid" }
+{ "project_id": "uuid", "draft": false }
 ```
+
+`draft: true` passes `-draftmode` to the engine for fast syntax checking without PDF output.
 
 **Response** `201`
 ```json
@@ -360,6 +528,7 @@ Submit a new compile job for a project.
   "project_id": "uuid",
   "status": "pending",
   "engine": "pdflatex",
+  "draft": false,
   "created_at": "..."
 }
 ```
@@ -380,6 +549,7 @@ Get full compile job details.
   "requester_id": "uuid",
   "status": "completed",
   "engine": "pdflatex",
+  "draft": false,
   "pdf_key": "artifacts/uuid/output.pdf",
   "duration_seconds": 3.14,
   "created_at": "...",
@@ -391,7 +561,7 @@ Get full compile job details.
 
 ### GET /compile/jobs/{job_id}/status
 
-Poll job status. Lightweight endpoint for the frontend polling loop.
+Poll job status. Lightweight endpoint for the frontend polling loop. Auto-creates a Snapshot when the job transitions to `completed`.
 
 **Auth**: required
 
@@ -412,6 +582,19 @@ Download the compiled PDF. Redirects to a presigned MinIO URL.
 
 **Errors**
 - `404` — job not completed or PDF not available
+
+---
+
+### GET /compile/jobs/{job_id}/artifact-url
+
+Return a cached presigned URL for direct browser-to-MinIO PDF streaming. Requires `MINIO_PUBLIC_URL` to be configured; falls back to blob streaming otherwise.
+
+**Auth**: required
+
+**Response** `200`
+```json
+{ "url": "http://minio:9000/artifacts/uuid/output.pdf?X-Amz-Signature=..." }
+```
 
 ---
 
@@ -437,6 +620,67 @@ Get raw pdflatex output log.
   "log": "This is pdfTeX, Version 3.141592...\n..."
 }
 ```
+
+---
+
+## Snapshots
+
+Snapshots are auto-created after each successful compile. They record the PDF artifact and a human-readable label.
+
+### GET /projects/{project_id}/snapshots
+
+List all snapshots for a project in reverse-chronological order.
+
+**Auth**: required (viewer+ role)
+
+**Response** `200`
+```json
+[
+  {
+    "id": "uuid",
+    "project_id": "uuid",
+    "compile_job_id": "uuid",
+    "label": "2026-03-01 14:23",
+    "artifact_ref": "artifacts/uuid/output.pdf",
+    "created_at": "..."
+  }
+]
+```
+
+---
+
+### GET /projects/{project_id}/snapshots/{snapshot_id}/artifact
+
+Stream the historical PDF for a snapshot.
+
+**Auth**: required (viewer+ role)
+
+**Response** `200` — `application/pdf` stream (or `307 Redirect` to presigned URL)
+
+---
+
+### PATCH /projects/{project_id}/snapshots/{snapshot_id}
+
+Rename the snapshot label.
+
+**Auth**: required (editor+ role)
+
+**Request body**
+```json
+{ "label": "First submission draft" }
+```
+
+**Response** `200` — updated snapshot object
+
+---
+
+### DELETE /projects/{project_id}/snapshots/{snapshot_id}
+
+Delete a snapshot record (does not delete the underlying PDF artifact).
+
+**Auth**: required (editor+ role)
+
+**Response** `204`
 
 ---
 
@@ -635,7 +879,7 @@ List all comments for a project, optionally filtered by file path.
 
 ### POST /projects/{project_id}/comments
 
-Create a comment (or reply to an existing one).
+Create a comment (or reply to an existing one). Sends an email notification via `BackgroundTasks` if SMTP is configured.
 
 **Auth**: required (commenter+ role)
 
@@ -655,7 +899,7 @@ Create a comment (or reply to an existing one).
 
 ### PATCH /projects/{project_id}/comments/{comment_id}
 
-Update comment content or resolve/re-open.
+Update comment content or resolve/re-open. Sends a resolution notification if `resolved` changes to `true`.
 
 **Auth**: required (comment author or owner)
 
@@ -749,3 +993,13 @@ Readiness check. Verifies connectivity to PostgreSQL and Redis.
   "errors": ["database: connection refused", "redis: timeout"]
 }
 ```
+
+---
+
+### GET /metrics
+
+Prometheus metrics endpoint.
+
+**Auth**: not required
+
+**Response** `200` — Prometheus text format (request counts, latencies, compile throughput, etc.)
