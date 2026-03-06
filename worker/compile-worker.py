@@ -98,6 +98,7 @@ def update_job_status(
     artifact_ref: str | None = None,
     logs_ref: str | None = None,
     error_message: str | None = None,
+    artifact_hash: str | None = None,
 ) -> None:
     """Update the compile_jobs row in PostgreSQL."""
     conn = None
@@ -111,10 +112,12 @@ def update_job_status(
                     artifact_ref = %s,
                     logs_ref = %s,
                     error_message = %s,
+                    artifact_hash = %s,
                     finished_at = %s
                 WHERE id = %s
                 """,
-                (status, artifact_ref, logs_ref, error_message, datetime.now(timezone.utc), job_id),
+                (status, artifact_ref, logs_ref, error_message, artifact_hash,
+                 datetime.now(timezone.utc), job_id),
             )
             print(f"Updated job {job_id} status to '{status}' in DB")
     except Exception as exc:
@@ -313,6 +316,19 @@ def callback(ch, method, properties, body):
         # Mark as running in the database
         set_job_running(job_id)
 
+        # Persist source snapshot to MinIO immediately (before compile) so
+        # the restore endpoint has a stable copy regardless of compile outcome.
+        files = job.get('files', [])
+        try:
+            source_json = json.dumps(files, ensure_ascii=False).encode('utf-8')
+            upload_bytes_to_minio(
+                f"artifacts/{job_id}/source.json",
+                source_json,
+                content_type="application/json",
+            )
+        except Exception as exc:
+            print(f"Warning: failed to upload source snapshot for job {job_id}: {exc}")
+
         # Download source files into sandbox
         download_files(job)
 
@@ -330,6 +346,16 @@ def callback(ch, method, properties, body):
                 logs_ref = upload_to_minio(logs_object_name, log_file, content_type="text/plain")
             except Exception as exc:
                 print(f"Failed to upload logs for job {job_id}: {exc}")
+
+        # Compute SHA-256 of source files for snapshot dedup.
+        # We hash sources (not the PDF) because pdflatex embeds timestamps,
+        # so identical source still produces a different PDF binary.
+        import hashlib
+        source_hasher = hashlib.sha256()
+        for f in sorted(job.get('files', []), key=lambda x: x['path']):
+            source_hasher.update(f['path'].encode())
+            source_hasher.update(f.get('content', '').encode())
+        source_hash = source_hasher.hexdigest()
 
         if success:
             # Upload PDF artifact to MinIO
@@ -353,8 +379,9 @@ def callback(ch, method, properties, body):
                 return
 
             # Upload SyncTeX file if present (best-effort)
+            # The synctex file is in the same per-job output dir as the PDF
             tex_stem = Path(artifact_path).stem
-            synctex_path = Path(OUTPUT_DIR) / f"{tex_stem}.synctex.gz"
+            synctex_path = Path(artifact_path).parent / f"{tex_stem}.synctex.gz"
             if synctex_path.exists():
                 try:
                     upload_to_minio(
@@ -371,6 +398,7 @@ def callback(ch, method, properties, body):
                 status="COMPLETED",
                 artifact_ref=artifact_ref,
                 logs_ref=logs_ref,
+                artifact_hash=source_hash,
             )
             print(f"Job {job_id} completed successfully")
         else:
