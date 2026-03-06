@@ -160,6 +160,7 @@ class CompileJob(Base):
     status = Column(SQLEnum(JobStatus), default=JobStatus.PENDING, nullable=False)
     logs_ref = Column(String, nullable=True)
     artifact_ref = Column(String, nullable=True)
+    artifact_hash = Column(String, nullable=True)
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     finished_at = Column(DateTime, nullable=True)
@@ -178,10 +179,12 @@ class Snapshot(Base):
     project_id = Column(String, ForeignKey("projects.id"), nullable=False)
     compile_job_id = Column(String, ForeignKey("compile_jobs.id"), nullable=False)
     label = Column(String, nullable=True)
+    created_by = Column(String, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     project = relationship("Project", back_populates="snapshots")
     compile_job = relationship("CompileJob", back_populates="snapshot")
+    creator = relationship("User", foreign_keys=[created_by])
 
 
 class TotpBackupCode(Base):

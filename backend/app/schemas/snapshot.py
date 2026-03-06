@@ -10,6 +10,8 @@ class SnapshotResponse(BaseModel):
     compile_job_id: str
     label: Optional[str] = None
     artifact_ref: Optional[str] = None
+    created_by: Optional[str] = None
+    creator_email: Optional[str] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

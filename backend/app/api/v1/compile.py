@@ -1,4 +1,6 @@
+import json
 import logging
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -104,15 +106,32 @@ def get_job_status(
 
     # Auto-create a Snapshot the first time we see a completed job with an artifact.
     # The unique constraint on compile_job_id makes this idempotent.
+    # Hash-based dedup: skip if the PDF is identical to the last snapshot's.
     if job.status == JobStatus.COMPLETED and job.artifact_ref:
         exists = db.query(Snapshot).filter(Snapshot.compile_job_id == job.id).first()
         if not exists:
-            snapshot = Snapshot(project_id=job.project_id, compile_job_id=job.id)
-            db.add(snapshot)
-            try:
-                db.commit()
-            except Exception:
-                db.rollback()
+            # Check if artifact hash matches the most recent snapshot
+            skip = False
+            if job.artifact_hash:
+                last_snap = (
+                    db.query(Snapshot)
+                    .filter(Snapshot.project_id == job.project_id)
+                    .order_by(Snapshot.created_at.desc())
+                    .first()
+                )
+                if last_snap and last_snap.compile_job and last_snap.compile_job.artifact_hash == job.artifact_hash:
+                    skip = True
+            if not skip:
+                snapshot = Snapshot(
+                    project_id=job.project_id,
+                    compile_job_id=job.id,
+                    created_by=current_user.id,
+                )
+                db.add(snapshot)
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
 
     return {
         "id": job.id,
@@ -250,6 +269,8 @@ def _snapshot_to_response(snap: Snapshot) -> dict:
         "compile_job_id": snap.compile_job_id,
         "label": snap.label,
         "artifact_ref": snap.compile_job.artifact_ref if snap.compile_job else None,
+        "created_by": snap.created_by,
+        "creator_email": snap.creator.email if snap.creator else None,
         "created_at": snap.created_at,
     }
 
@@ -319,6 +340,90 @@ def update_snapshot(
     db.commit()
     db.refresh(snap)
     return _snapshot_to_response(snap)
+
+
+@snapshots_router.get("/{project_id}/snapshots/{snapshot_id}/source")
+def get_snapshot_source(
+    project_id: str,
+    snapshot_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the list of source files captured at this snapshot's compile time."""
+    get_project_with_access(project_id, current_user.id, db)  # type: ignore[misc]
+    snap = db.query(Snapshot).filter(
+        Snapshot.id == snapshot_id, Snapshot.project_id == project_id
+    ).first()
+    if not snap:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    source_ref = f"artifacts/{snap.compile_job_id}/source.json"
+    try:
+        bucket = minio_service._default_bucket
+        raw = minio_service.download_file(bucket, source_ref)
+        files_data: list[dict] = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"Source not available for snapshot {snapshot_id}: {e}")
+        raise HTTPException(
+            status_code=404,
+            detail="Source snapshot not available. Only snapshots created after this feature was added can be browsed.",
+        )
+
+    return {"files": files_data}
+
+
+@snapshots_router.post("/{project_id}/snapshots/{snapshot_id}/restore")
+def restore_snapshot(
+    project_id: str,
+    snapshot_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Restore all project files to the state captured when this snapshot was created."""
+    get_project_with_access(project_id, current_user.id, db, minimum_role=ProjectRole.EDITOR)  # type: ignore[misc]
+    snap = db.query(Snapshot).filter(
+        Snapshot.id == snapshot_id, Snapshot.project_id == project_id
+    ).first()
+    if not snap:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    source_ref = f"artifacts/{snap.compile_job_id}/source.json"
+    try:
+        bucket = minio_service._default_bucket
+        raw = minio_service.download_file(bucket, source_ref)
+        files_data: list[dict] = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"Source snapshot not available for {snapshot_id}: {e}")
+        raise HTTPException(
+            status_code=404,
+            detail="Source snapshot not available for this entry. Only snapshots created after this feature was added can be restored.",
+        )
+
+    # Build a map of current files for this project
+    existing = {
+        pf.path: pf
+        for pf in db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    }
+    snapshot_paths = {f["path"] for f in files_data}
+
+    for file_data in files_data:
+        path = file_data["path"]
+        content = file_data.get("content", "")
+        blob_ref = f"projects/{project_id}/{uuid4()}"
+        minio_service.upload_file(bucket, blob_ref, content.encode("utf-8"))
+
+        if path in existing:
+            existing[path].blob_ref = blob_ref
+        else:
+            db.add(ProjectFile(project_id=project_id, path=path, blob_ref=blob_ref))
+
+    # Delete files that existed in the project but not in the snapshot
+    for path, pf in existing.items():
+        if path not in snapshot_paths:
+            db.delete(pf)
+
+    db.commit()
+    return {"restored": True, "file_count": len(files_data)}
 
 
 @snapshots_router.delete("/{project_id}/snapshots/{snapshot_id}", status_code=204)
