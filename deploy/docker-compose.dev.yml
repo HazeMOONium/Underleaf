@@ -85,6 +85,10 @@ services:
       - RABBITMQ_PORT=5672
       # Set to the host-accessible MinIO URL so presigned URLs work in dev
       - MINIO_PUBLIC_URL=http://localhost:19000
+      # AI (DeepSeek) — set your API key to enable AI assistant
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
     depends_on:
       postgres:
         condition: service_healthy
@@ -173,7 +177,7 @@ services:
     ports:
       - "19090:9090"
     volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus:/etc/prometheus:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
